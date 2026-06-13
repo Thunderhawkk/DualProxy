@@ -1,0 +1,3 @@
+#define IDI_TRAY_GREEN   101
+#define IDI_TRAY_RED     102
+#define IDI_TRAY_YELLOW  103

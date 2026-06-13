@@ -1,0 +1,61 @@
+; VirtualDualSense.inf
+; Installs VirtualDualSense.sys as a root-enumerated WDF KMDF driver
+; that uses Virtual HID Framework (VHF) to create a virtual DualSense controller
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=HIDClass
+ClassGuid={745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider=%ManufacturerName%
+DriverVer=06/14/2026,1.0.0.0
+CatalogFile=VirtualDualSense.cat
+PnpLockDown=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+DriverPackageInstall = 13
+
+[DefaultInstall]
+OptionDesc = %DeviceDescription%
+CopyFiles = DriverFiles
+
+[DefaultInstall.Services]
+AddService = VirtualDualSense, 0x00000002, DriverService
+
+[DefaultUninstall]
+DelFiles = DriverFiles
+DelReg = DriverReg
+
+[DefaultUninstall.Services]
+DelService = VirtualDualSense, 0x200
+
+[DriverFiles]
+VirtualDualSense.sys
+
+[DriverService]
+DisplayName    = %ServiceName%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\VirtualDualSense.sys
+LoadOrderGroup = Base
+
+[DriverReg]
+HKLM, "SYSTEM\CurrentControlSet\Services\VirtualDualSense\Parameters", "DeviceId", 0x00010003, "VIRTUALDUALSENSE"
+
+[Manufacturer]
+%ManufacturerName% = DeviceList, NTamd64
+
+[DeviceList.NTamd64]
+%DeviceDescription% = Root\VirtualDualSense
+
+[Root\VirtualDualSense.NTamd64.HW]
+AddReg = Root\VirtualDualSense.NTamd64.HW.AddReg
+
+[Root\VirtualDualSense.NTamd64.HW.AddReg]
+HKR, , "HardwareID", 0x00000000, "ROOT\VirtualDualSense"
+
+[Strings]
+ManufacturerName = "DualProxy"
+DeviceDescription = "Virtual DualSense Controller"
+ServiceName = "VirtualDualSense"
