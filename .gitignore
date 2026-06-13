@@ -1,0 +1,30 @@
+# Build outputs
+Debug/
+Release/
+x64/
+ARM64/
+*.obj
+*.pdb
+*.exp
+*.ilk
+*.lib
+*.exe
+*.sys
+*.log
+*.cat
+*.cer
+
+# VS user files
+*.user
+*.suo
+*.sdf
+*.opensdf
+.vs/
+.vscode/
+
+# Driver signing
+*.pfx
+
+# OS
+Thumbs.db
+Desktop.ini
