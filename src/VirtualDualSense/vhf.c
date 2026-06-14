@@ -1,5 +1,4 @@
 #include "vhf.h"
-#include "trace.h"
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, VhfActivate)
@@ -25,17 +24,16 @@ VhfActivate(
         &vhfConfig,
         WdfDeviceWdmGetDeviceObject(DeviceContext->WdfDevice),
         DUALSENSE_HID_DESCRIPTOR_SIZE,
-        (PUCHAR)DualSenseHidDescriptor,
-        DUALSENSE_INPUT_REPORT_SIZE,
-        DUALSENSE_OUTPUT_REPORT_SIZE,
-        DUALSENSE_FEATURE_REPORT_SIZE
+        (PUCHAR)DualSenseHidDescriptor
     );
 
-    vhfConfig.VendorId = DUALSENSE_VID;
-    vhfConfig.ProductId = DUALSENSE_PID;
+    vhfConfig.VendorID = DUALSENSE_VID;
+    vhfConfig.ProductID = DUALSENSE_PID;
     vhfConfig.VersionNumber = DUALSENSE_VERSION;
-    vhfConfig.EvtVhfAsyncOperation = VirtualDualSenseEvtVhfAsyncOperation;
-    vhfConfig.VhfOperationContext = DeviceContext;
+    vhfConfig.VhfClientContext = DeviceContext;
+    vhfConfig.EvtVhfAsyncOperationWriteReport = VirtualDualSenseEvtVhfAsyncWriteReport;
+    vhfConfig.EvtVhfAsyncOperationGetFeature = VirtualDualSenseEvtVhfAsyncGetFeature;
+    vhfConfig.EvtVhfAsyncOperationSetFeature = VirtualDualSenseEvtVhfAsyncSetFeature;
 
     status = VhfCreate(&vhfConfig, &DeviceContext->VhfHandle);
     if (!NT_SUCCESS(status))
@@ -76,6 +74,18 @@ VhfDeactivate(
         DeviceContext->VhfHandle = NULL;
     }
 
+    // Drain any pending output reports
+    for (;;)
+    {
+        PSLIST_ENTRY entry = InterlockedPopEntrySList(&DeviceContext->OutputReportList);
+        if (entry == NULL)
+        {
+            break;
+        }
+        ExFreePool(CONTAINING_RECORD(entry, OUTPUT_REPORT_ENTRY, ListEntry));
+        InterlockedDecrement(&DeviceContext->OutputReportCount);
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -98,7 +108,7 @@ VhfSubmitInputReport(
     transferPacket.reportBufferLen = ReportSize;
     transferPacket.reportId = DUALSENSE_INPUT_REPORT_ID;
 
-    status = VhfSubmitReadReport(DeviceContext->VhfHandle, &transferPacket);
+    status = VhfReadReportSubmit(DeviceContext->VhfHandle, &transferPacket);
     if (!NT_SUCCESS(status))
     {
         return status;
@@ -107,67 +117,178 @@ VhfSubmitInputReport(
     return STATUS_SUCCESS;
 }
 
+static
 VOID
-VirtualDualSenseEvtVhfAsyncOperation(
-    _In_ VHFHANDLE VhfHandle,
-    _In_ PVOID VhfOperationContext,
+FillCalibrationReport(
+    _Out_writes_bytes_(40) PUCHAR Buffer
+)
+{
+    RtlFillMemory(Buffer, 40, 0);
+    Buffer[0] = 0x05;
+}
+
+static
+VOID
+FillPairInfo(
+    _Out_writes_bytes_(19) PUCHAR Buffer
+)
+{
+    RtlFillMemory(Buffer, 19, 0);
+    Buffer[0] = 0x09;
+    Buffer[1] = 0x01;
+}
+
+static
+VOID
+FillRevisionInfo(
+    _Out_writes_bytes_(63) PUCHAR Buffer
+)
+{
+    RtlFillMemory(Buffer, 63, 0);
+    Buffer[0] = 0x20;
+    PUCHAR ts = &Buffer[1];
+    ts[0] = '2'; ts[1] = '0'; ts[2] = '2'; ts[3] = '4';
+    ts[4] = ':'; ts[5] = '0'; ts[6] = '1';
+    ts[7] = ':'; ts[8] = '0'; ts[9] = '1';
+    ts[10] = ' '; ts[11] = '0'; ts[12] = '0';
+    ts[13] = ':'; ts[14] = '0'; ts[15] = '0';
+    ts[16] = ':'; ts[17] = '0'; ts[18] = '0';
+    Buffer[27] = 0x04;
+    Buffer[28] = 0x00;
+}
+
+_Function_class_(EVT_VHF_ASYNC_OPERATION)
+VOID
+VirtualDualSenseEvtVhfAsyncWriteReport(
+    _In_ PVOID VhfClientContext,
+    _In_ VHFOPERATIONHANDLE VhfOperationHandle,
+    _In_opt_ PVOID VhfOperationContext,
     _In_ PHID_XFER_PACKET TransferPacket
 )
 {
-    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)VhfOperationContext;
-    NTSTATUS status;
+    UNREFERENCED_PARAMETER(VhfOperationContext);
+    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)VhfClientContext;
 
-    if (ctx == NULL || !ctx->VhfActive)
+    if (ctx == NULL || !ctx->VhfActive || TransferPacket == NULL)
     {
-        VhfAsyncOperationComplete(VhfHandle, STATUS_SUCCESS);
+        VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
         return;
     }
 
-    // Queue the output report for the userspace service to read
-    // Create a WDFREQUEST to hold the output report data
-    WDFREQUEST outputRequest = NULL;
-    WDF_OBJECT_ATTRIBUTES requestAttrs;
-    WDF_OBJECT_ATTRIBUTES_INIT(&requestAttrs);
-    requestAttrs.ParentObject = ctx->WdfDevice;
-
-    status = WdfRequestCreate(&requestAttrs, ctx->WdfDevice, &outputRequest);
-    if (NT_SUCCESS(status) && outputRequest != NULL)
+    if (TransferPacket->reportBuffer == NULL || TransferPacket->reportBufferLen == 0)
     {
-        // Allocate a buffer for the output report
-        PUCHAR reportBuffer = (PUCHAR)ExAllocatePool2(
-            POOL_FLAG_NON_PAGED,
-            DUALSENSE_OUTPUT_REPORT_SIZE,
-            'DSVO'
-        );
-
-        if (reportBuffer != NULL)
-        {
-            RtlCopyMemory(
-                reportBuffer,
-                TransferPacket->reportBuffer,
-                min(TransferPacket->reportBufferLen, DUALSENSE_OUTPUT_REPORT_SIZE)
-            );
-
-            // Set the buffer as the request's input buffer
-            WDF_MEMORY_DESCRIPTOR memDesc;
-            WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&memDesc, reportBuffer, DUALSENSE_OUTPUT_REPORT_SIZE);
-
-            // Forward to output queue
-            WDFREQUEST forwardedReq;
-            status = WdfRequestForwardToIoQueue(outputRequest, ctx->OutputReportQueue);
-            if (!NT_SUCCESS(status))
-            {
-                ExFreePoolWithTag(reportBuffer, 'DSVO');
-                WdfRequestComplete(outputRequest, status);
-            }
-            // Request is now owned by OutputReportQueue
-        }
-        else
-        {
-            WdfRequestComplete(outputRequest, STATUS_INSUFFICIENT_RESOURCES);
-        }
+        VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
+        return;
     }
 
-    // Complete the VHF operation
-    VhfAsyncOperationComplete(VhfHandle, STATUS_SUCCESS);
+    ULONG copySize = TransferPacket->reportBufferLen;
+    if (copySize > DUALSENSE_OUTPUT_REPORT_SIZE)
+    {
+        copySize = DUALSENSE_OUTPUT_REPORT_SIZE;
+    }
+
+    POUTPUT_REPORT_ENTRY entry = (POUTPUT_REPORT_ENTRY)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
+        sizeof(OUTPUT_REPORT_ENTRY),
+        'DSVO'
+    );
+
+    if (entry == NULL)
+    {
+        VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
+        return;
+    }
+
+    RtlCopyMemory(entry->Data, TransferPacket->reportBuffer, copySize);
+    entry->Size = copySize;
+
+    InterlockedPushEntrySList(&ctx->OutputReportList, &entry->ListEntry);
+    InterlockedIncrement(&ctx->OutputReportCount);
+
+    VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
+}
+
+_Function_class_(EVT_VHF_ASYNC_OPERATION)
+VOID
+VirtualDualSenseEvtVhfAsyncGetFeature(
+    _In_ PVOID VhfClientContext,
+    _In_ VHFOPERATIONHANDLE VhfOperationHandle,
+    _In_opt_ PVOID VhfOperationContext,
+    _In_ PHID_XFER_PACKET TransferPacket
+)
+{
+    UNREFERENCED_PARAMETER(VhfOperationContext);
+    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)VhfClientContext;
+
+    if (ctx == NULL || !ctx->VhfActive || TransferPacket == NULL)
+    {
+        VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
+        return;
+    }
+
+    UCHAR reportId = TransferPacket->reportId;
+    PUCHAR buffer = TransferPacket->reportBuffer;
+    ULONG bufLen = TransferPacket->reportBufferLen;
+
+    switch (reportId)
+    {
+    case 0x05:
+        if (bufLen >= 40)
+        {
+            FillCalibrationReport(buffer);
+            TransferPacket->reportBufferLen = 40;
+        }
+        break;
+
+    case 0x09:
+        if (bufLen >= 19)
+        {
+            FillPairInfo(buffer);
+            TransferPacket->reportBufferLen = 19;
+        }
+        break;
+
+    case 0x20:
+        if (bufLen >= 63)
+        {
+            FillRevisionInfo(buffer);
+            TransferPacket->reportBufferLen = 63;
+        }
+        break;
+
+    case 0x22:
+        if (bufLen >= 63)
+        {
+            RtlFillMemory(buffer, 63, 0);
+            buffer[0] = 0x22;
+            TransferPacket->reportBufferLen = 63;
+        }
+        break;
+
+    default:
+        if (buffer != NULL && bufLen > 0)
+        {
+            RtlFillMemory(buffer, bufLen, 0);
+            buffer[0] = reportId;
+        }
+        break;
+    }
+
+    VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
+}
+
+_Function_class_(EVT_VHF_ASYNC_OPERATION)
+VOID
+VirtualDualSenseEvtVhfAsyncSetFeature(
+    _In_ PVOID VhfClientContext,
+    _In_ VHFOPERATIONHANDLE VhfOperationHandle,
+    _In_opt_ PVOID VhfOperationContext,
+    _In_ PHID_XFER_PACKET TransferPacket
+)
+{
+    UNREFERENCED_PARAMETER(VhfClientContext);
+    UNREFERENCED_PARAMETER(VhfOperationContext);
+    UNREFERENCED_PARAMETER(TransferPacket);
+
+    VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
 }

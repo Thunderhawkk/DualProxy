@@ -11,51 +11,46 @@ DriverVer=06/14/2026,1.0.0.0
 CatalogFile=VirtualDualSense.cat
 PnpLockDown=1
 
+[SourceDisksFiles]
+VirtualDualSense.sys = 1
+
+[SourceDisksNames]
+1 = %DiskName%
+
 [DestinationDirs]
-DefaultDestDir = 12
-DriverPackageInstall = 13
-
-[DefaultInstall]
-OptionDesc = %DeviceDescription%
-CopyFiles = DriverFiles
-
-[DefaultInstall.Services]
-AddService = VirtualDualSense, 0x00000002, DriverService
-
-[DefaultUninstall]
-DelFiles = DriverFiles
-DelReg = DriverReg
-
-[DefaultUninstall.Services]
-DelService = VirtualDualSense, 0x200
-
-[DriverFiles]
-VirtualDualSense.sys
-
-[DriverService]
-DisplayName    = %ServiceName%
-ServiceType    = 1
-StartType      = 3
-ErrorControl   = 1
-ServiceBinary  = %12%\VirtualDualSense.sys
-LoadOrderGroup = Base
-
-[DriverReg]
-HKLM, "SYSTEM\CurrentControlSet\Services\VirtualDualSense\Parameters", "DeviceId", 0x00010003, "VIRTUALDUALSENSE"
+VirtualDualSense.CopyFiles = 12
 
 [Manufacturer]
 %ManufacturerName% = DeviceList, NTamd64
 
 [DeviceList.NTamd64]
-%DeviceDescription% = Root\VirtualDualSense
+%DeviceDescription% = RootInstall, Root\VirtualDualSense
 
-[Root\VirtualDualSense.NTamd64.HW]
-AddReg = Root\VirtualDualSense.NTamd64.HW.AddReg
+[RootInstall.NTamd64]
+CopyFiles = VirtualDualSense.CopyFiles
+AddReg = VirtualDualSense.AddReg
 
-[Root\VirtualDualSense.NTamd64.HW.AddReg]
+[RootInstall.NTamd64.Services]
+AddService = VirtualDualSense, 0x00000002, VirtualDualSense.Service
+
+[VirtualDualSense.CopyFiles]
+VirtualDualSense.sys
+
+[VirtualDualSense.AddReg]
 HKR, , "HardwareID", 0x00000000, "ROOT\VirtualDualSense"
+
+[VirtualDualSense.Service]
+DisplayName    = %ServiceName%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\VirtualDualSense.sys
+
+[VirtualDualSense.Service.KMDF]
+KmdfLibraryVersion = 1.33
 
 [Strings]
 ManufacturerName = "DualProxy"
 DeviceDescription = "Virtual DualSense Controller"
 ServiceName = "VirtualDualSense"
+DiskName = "Virtual DualSense Installation Media"

@@ -54,6 +54,6 @@ private:
 #define LOG_CRITICAL(cat, id, ...) Logger::Instance().Log(LOG_CRITICAL, cat, id, __VA_ARGS__)
 
 // Log category constants
-// Service: SVC_MAIN, SVC_BT, SVC_VHF, SVC_IOCTL, SVC_CONV, SVC_FEAT
+// Service: SVC_MAIN, SVC_BT, SVC_VHF, SVC_IOCTL, SVC_CONV, SVC_FEAT, SVC_IPC
 // Driver: DRV_INIT, DRV_PNP, DRV_VHF, DRV_IOCTL, DRV_BT
 // Tray: TRAY_MAIN, TRAY_IPC, TRAY_HK, TRAY_STATE

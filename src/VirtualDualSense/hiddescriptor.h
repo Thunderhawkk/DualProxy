@@ -56,8 +56,9 @@ typedef struct _DUALSENSE_INPUT_REPORT {
     UCHAR Sequence;           // Incremented each report
     UCHAR DpadAndButtons1;    // Bits: D-pad(0-3), Square(4), Cross(5), Circle(6), Triangle(7)
     UCHAR Buttons2;           // Bits: L1(0), R1(1), L2-click(2), R2-click(3), Create(4), Options(5), L3(6), R3(7)
-    UCHAR Buttons3;           // Bits: PS(0), Touchpad(1), Mic(2), padding(3-7)
-    UCHAR VendorExtended[40]; // Touchpad, IMU, battery, CRC
+    UCHAR Buttons3;           // Bits: PS(0), Touchpad(1), Mic(2), padding(5 bits)
+    UCHAR PaddingByte;        // Remaining HID padding (8 bits)
+    UCHAR VendorExtended[52]; // Touchpad, IMU, battery, CRC
 } DUALSENSE_INPUT_REPORT, *PDUALSENSE_INPUT_REPORT;
 #pragma pack(pop)
 
@@ -151,7 +152,7 @@ static const UCHAR DualSenseHidDescriptor[] = {
     0x85, 0x02,        //   Report ID (2)
     0x09, 0x23,        //   Usage (0x23)
     0x95, 0x2F,        //   Report Count (47)
-    0x81, 0x02,        //   Output (Data,Var,Abs)
+    0x91, 0x02,        //   Output (Data,Var,Abs)
 
     // Report ID 5: Feature GET - Sensor Calibration (40 bytes)
     0x85, 0x05,        //   Report ID (5)

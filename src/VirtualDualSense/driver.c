@@ -1,5 +1,7 @@
 #include "driver.h"
-#include "trace.h"
+#include <ntstrsafe.h>
+
+DRIVER_INITIALIZE DriverEntry;
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, DriverEntry)
@@ -7,8 +9,6 @@
 #pragma alloc_text(PAGE, VirtualDualSenseEvtDevicePrepareHardware)
 #pragma alloc_text(PAGE, VirtualDualSenseEvtDeviceReleaseHardware)
 #endif
-
-DRIVER_INITIALIZE DriverEntry;
 
 NTSTATUS
 DriverEntry(
@@ -49,7 +49,6 @@ VirtualDualSenseEvtDeviceAdd(
 {
     WDFDEVICE device;
     WDF_OBJECT_ATTRIBUTES attrs;
-    PWDFDEVICE_INIT pnpInit = NULL;
     NTSTATUS status;
     UNICODE_STRING symlink;
     PDEVICE_CONTEXT ctx;
@@ -62,7 +61,7 @@ VirtualDualSenseEvtDeviceAdd(
     // Use FileObject context for per-instance identification
     {
         WDF_FILEOBJECT_CONFIG fileConfig;
-        WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, NULL, NULL, NULL, WdfFalse);
+        WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, NULL, NULL, NULL);
         WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, WDF_NO_OBJECT_ATTRIBUTES);
     }
 
@@ -72,6 +71,7 @@ VirtualDualSenseEvtDeviceAdd(
         WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpCallbacks);
         pnpCallbacks.EvtDevicePrepareHardware = VirtualDualSenseEvtDevicePrepareHardware;
         pnpCallbacks.EvtDeviceReleaseHardware = VirtualDualSenseEvtDeviceReleaseHardware;
+        pnpCallbacks.EvtDeviceSelfManagedIoCleanup = VirtualDualSenseEvtSelfManagedIoCleanup;
         WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpCallbacks);
     }
 
@@ -91,8 +91,8 @@ VirtualDualSenseEvtDeviceAdd(
     ctx->WdfDevice = device;
     ctx->VhfHandle = NULL;
     ctx->VhfActive = FALSE;
-    ctx->OutputReportQueue = NULL;
-    ctx->OutputLock = NULL;
+    InitializeSListHead(&ctx->OutputReportList);
+    ctx->OutputReportCount = 0;
 
     // Assign instance index
     ctx->InstanceIndex = InterlockedIncrement(&drvCtx->NextInstance) - 1;
@@ -105,31 +105,14 @@ VirtualDualSenseEvtDeviceAdd(
     // Create symbolic link
     {
         WCHAR symlinkBuf[64];
-        HRESULT hr = StringCbPrintfW(symlinkBuf, sizeof(symlinkBuf),
+        NTSTATUS hr = RtlStringCbPrintfW(symlinkBuf, sizeof(symlinkBuf),
             L"%s%hd", SYMLINK_NAME_PREFIX, ctx->InstanceIndex);
-        if (FAILED(hr))
+        if (!NT_SUCCESS(hr))
         {
             return STATUS_INVALID_PARAMETER;
         }
         RtlInitUnicodeString(&symlink, symlinkBuf);
         status = WdfDeviceCreateSymbolicLink(device, &symlink);
-        if (!NT_SUCCESS(status))
-        {
-            return status;
-        }
-    }
-
-    // Create output report queue (manual-dispatch so we control dequeue)
-    {
-        WDF_IO_QUEUE_CONFIG queueConfig;
-        WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
-
-        status = WdfIoQueueCreate(
-            device,
-            &queueConfig,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &ctx->OutputReportQueue
-        );
         if (!NT_SUCCESS(status))
         {
             return status;
@@ -154,13 +137,6 @@ VirtualDualSenseEvtDeviceAdd(
         }
     }
 
-    // Create output lock
-    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->OutputLock);
-    if (!NT_SUCCESS(status))
-    {
-        return status;
-    }
-
     return STATUS_SUCCESS;
 }
 
@@ -171,6 +147,7 @@ VirtualDualSenseEvtDevicePrepareHardware(
     _In_ WDFCMRESLIST ResourceListTranslated
 )
 {
+    UNREFERENCED_PARAMETER(Device);
     UNREFERENCED_PARAMETER(ResourceList);
     UNREFERENCED_PARAMETER(ResourceListTranslated);
 

@@ -1,4 +1,5 @@
 #include "bridge.h"
+#include "logging.h"
 #include <memory.h>
 
 #define SVC_MAIN "SVC_MAIN"
@@ -38,7 +39,7 @@ bool DualSenseBridge::Initialize()
 
     if (!OpenSideband())
     {
-        LOG_ERROR(SVC_IOCTL, 50, "Failed to open sideband device, error=%d", GetLastError());
+        LOG_ERROR(SVC_IOCTL, 50, "Failed to open sideband device, error=%lu", GetLastError());
         return false;
     }
 
@@ -69,7 +70,7 @@ bool DualSenseBridge::OpenSideband()
 
     if (m_sidebandHandle == INVALID_HANDLE_VALUE)
     {
-        LOG_ERROR(SVC_IOCTL, 100, "CreateFile(%s) failed, error=%d", "VirtualDualSense0", GetLastError());
+        LOG_ERROR(SVC_IOCTL, 100, "CreateFile(%s) failed, error=%lu", "VirtualDualSense0", GetLastError());
         return false;
     }
 
@@ -120,15 +121,15 @@ bool DualSenseBridge::Activate()
     BOOL ok = DeviceIoControl(
         m_sidebandHandle,
         VDS_ACTIVATE,
-        NULL, 0,
-        NULL, 0,
+        NULL, 0UL,
+        NULL, 0UL,
         &bytesReturned,
         NULL
     );
 
     if (!ok)
     {
-        LOG_ERROR(SVC_VHF, 300, "VDS_ACTIVATE failed, error=%d", GetLastError());
+        LOG_ERROR(SVC_VHF, 300, "VDS_ACTIVATE failed, error=%lu", GetLastError());
         return false;
     }
 
@@ -148,15 +149,15 @@ bool DualSenseBridge::Deactivate()
     BOOL ok = DeviceIoControl(
         m_sidebandHandle,
         VDS_DEACTIVATE,
-        NULL, 0,
-        NULL, 0,
+        NULL, 0UL,
+        NULL, 0UL,
         &bytesReturned,
         NULL
     );
 
     if (!ok)
     {
-        LOG_ERROR(SVC_VHF, 302, "VDS_DEACTIVATE failed, error=%d", GetLastError());
+        LOG_ERROR(SVC_VHF, 302, "VDS_DEACTIVATE failed, error=%lu", GetLastError());
         return false;
     }
 
@@ -171,15 +172,15 @@ bool DualSenseBridge::SubmitInputReport(const BYTE* report, DWORD size)
     BOOL ok = DeviceIoControl(
         m_sidebandHandle,
         VDS_SUBMIT_INPUT,
-        (LPVOID)report, size,
-        NULL, 0,
+        const_cast<LPVOID>(static_cast<const void*>(report)), size,
+        NULL, 0UL,
         &bytesReturned,
         NULL
     );
 
     if (!ok)
     {
-        LOG_ERROR(SVC_IOCTL, 400, "VDS_SUBMIT_INPUT failed, error=%d", GetLastError());
+        LOG_ERROR(SVC_IOCTL, 400, "VDS_SUBMIT_INPUT failed, error=%lu", GetLastError());
         return false;
     }
 
@@ -192,7 +193,7 @@ bool DualSenseBridge::ReadOutputReport(BYTE* report, DWORD* size)
     BOOL ok = DeviceIoControl(
         m_sidebandHandle,
         VDS_READ_OUTPUT,
-        NULL, 0,
+        NULL, 0UL,
         report, *size,
         &bytesReturned,
         NULL
@@ -233,7 +234,7 @@ int DualSenseBridge::GetOutputReportCount()
     BOOL ok = DeviceIoControl(
         m_sidebandHandle,
         VDS_GET_OUTPUT_COUNT,
-        NULL, 0,
+        NULL, 0UL,
         countBuf, 4,
         &bytesReturned,
         NULL
@@ -262,8 +263,6 @@ void DualSenseBridge::Run()
     BYTE usbOutput[48];
     BYTE btOutput[78];
     DWORD btOutputSize = 0;
-
-    int btReconnectDelay = 0;
 
     while (WaitForSingleObject(m_stopEvent, 0) == WAIT_TIMEOUT)
     {

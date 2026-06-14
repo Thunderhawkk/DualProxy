@@ -1,10 +1,15 @@
 #include "hidapi.h"
 #include <memory.h>
-#include <devguid.h>
+#include <stdlib.h>
+#include <hidsdi.h>
 
-#define DUALSHENSE_VID 0x054C
-#define DUALSHENSE_PID_USB  0x0CE6
-#define DUALSHENSE_PID_BT   0x0CE6  // BT uses same PID on Windows
+// DEFINE_GUID from devguid.h / hidsdi.h for the HID interface class
+// {4d1e55b2-f16f-11cf-88cb-001111000030}
+static const GUID GUID_DEVINTERFACE_HID = {0x4d1e55b2, 0xf16f, 0x11cf, {0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
+
+#define DUALSENSE_VID 0x054C
+#define DUALSENSE_PID_USB  0x0CE6
+#define DUALSENSE_PID_BT   0x0CE6  // BT uses same PID on Windows
 
 bool HIDApi::FindDualSense(DualSenseDevice& device)
 {
@@ -12,7 +17,6 @@ bool HIDApi::FindDualSense(DualSenseDevice& device)
     HDEVINFO deviceInfoSet = INVALID_HANDLE_VALUE;
     SP_DEVICE_INTERFACE_DATA interfaceData;
     PSP_DEVICE_INTERFACE_DETAIL_DATA detailData = NULL;
-    DWORD detailSize = 0;
 
     // Get HID device interface set
     deviceInfoSet = SetupDiGetClassDevs(
@@ -82,7 +86,7 @@ bool HIDApi::FindDualSense(DualSenseDevice& device)
 
         if (HidD_GetAttributes(hDevice, &attrs))
         {
-            if (attrs.VendorID == DUALSHENSE_VID && attrs.ProductID == DUALSHENSE_PID)
+            if (attrs.VendorID == DUALSENSE_VID && attrs.ProductID == DUALSENSE_PID_BT)
             {
                 // Found a DualSense!
                 device.Handle = hDevice;
@@ -134,6 +138,7 @@ bool HIDApi::ReadInput(HANDLE handle, BYTE* buffer, DWORD size, DWORD timeoutMs)
 
     DWORD bytesRead = 0;
     bool success = false;
+    DWORD lastError = 0;
 
     if (ReadFile(handle, buffer, size, &bytesRead, &ov))
     {
@@ -141,26 +146,34 @@ bool HIDApi::ReadInput(HANDLE handle, BYTE* buffer, DWORD size, DWORD timeoutMs)
     }
     else
     {
-        if (GetLastError() == ERROR_IO_PENDING)
+        lastError = GetLastError();
+        if (lastError == ERROR_IO_PENDING)
         {
-            // Wait for completion or timeout
             DWORD waitResult = WaitForSingleObject(ov.hEvent, timeoutMs);
             if (waitResult == WAIT_OBJECT_0)
             {
-                if (GetOverlappedResult(handle, &ov, &bytesRead, FALSE))
+                if (!GetOverlappedResult(handle, &ov, &bytesRead, FALSE))
+                {
+                    lastError = GetLastError();
+                }
+                else
                 {
                     success = (bytesRead == size);
+                    lastError = 0;
                 }
             }
             else
             {
-                // Timeout - cancel the I/O
                 CancelIo(handle);
+                WaitForSingleObject(ov.hEvent, INFINITE);
+                GetOverlappedResult(handle, &ov, &bytesRead, FALSE);
+                lastError = ERROR_TIMEOUT;
             }
         }
     }
 
     CloseHandle(ov.hEvent);
+    SetLastError(lastError);
     return success;
 }
 

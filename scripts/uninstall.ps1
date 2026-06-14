@@ -8,7 +8,7 @@
     and verifies no leftovers remain.
 #>
 
-$DevConPath = "$PSScriptRoot\devcon.exe"
+$DevConPath = Resolve-Path (Join-Path $PSScriptRoot "..\Drivers\devcon.exe")
 $DriverDest = "$env:SystemRoot\System32\drivers\VirtualDualSense.sys"
 $ServiceName = "DualProxySvc"
 $DriverName = "VirtualDualSense"

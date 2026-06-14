@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <stdio.h>
 #include <strsafe.h>
 
@@ -142,6 +143,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_TRAY_EXIT:
             DestroyWindow(hwnd);
             break;
+        default:
+            break;
         }
         return 0;
 
@@ -261,7 +264,8 @@ void ToggleEmulation()
 
     if (g_enabled)
     {
-        if (SendServiceCommand(L"DISABLE", response, sizeof(response)))
+        if (SendServiceCommand(L"DISABLE", response, sizeof(response)) &&
+            wcscmp(response, L"OK") == 0)
         {
             g_enabled = false;
             UpdateTrayIcon(TRAY_RED);
@@ -269,7 +273,8 @@ void ToggleEmulation()
     }
     else
     {
-        if (SendServiceCommand(L"ENABLE", response, sizeof(response)))
+        if (SendServiceCommand(L"ENABLE", response, sizeof(response)) &&
+            wcscmp(response, L"OK") == 0)
         {
             g_enabled = true;
             UpdateTrayIcon(TRAY_GREEN);

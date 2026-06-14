@@ -1,8 +1,5 @@
 #include "logging.h"
-#include <process.h>
-#include <dbghelp.h>
-
-#pragma comment(lib, "dbghelp.lib")
+#include <io.h>
 
 Logger& Logger::Instance()
 {
@@ -32,7 +29,7 @@ void Logger::Init(const wchar_t* componentName, LogLevel minLevel)
     wcsncpy_s(m_component, componentName, _TRUNCATE);
     m_minLevel = minLevel;
 
-    // Create log directory: %PROGRAMDATA%\DualProxy\logs\
+    // Create log directory: PROGRAMDATA\DualProxy\logs
     wchar_t progData[MAX_PATH];
     if (GetEnvironmentVariableW(L"PROGRAMDATA", progData, MAX_PATH) > 0)
     {
@@ -40,7 +37,9 @@ void Logger::Init(const wchar_t* componentName, LogLevel minLevel)
 
         wchar_t dirPath[MAX_PATH];
         swprintf_s(dirPath, L"%s\\DualProxy\\logs", progData);
-        CreateDirectoryW(L"%PROGRAMDATA%\\DualProxy", NULL);
+        wchar_t dualProxyDir[MAX_PATH];
+        swprintf_s(dualProxyDir, L"%s\\DualProxy", progData);
+        CreateDirectoryW(dualProxyDir, NULL);
         CreateDirectoryW(dirPath, NULL);
     }
     else
@@ -50,22 +49,22 @@ void Logger::Init(const wchar_t* componentName, LogLevel minLevel)
 
     m_initialized = true;
 
-    // Log initialization
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    char timeBuf[64];
-    sprintf_s(timeBuf, "%04d-%02d-%02d %02d:%02d:%02d.%03d",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-
-    EnterCriticalSection(&m_cs);
-    FILE* f = NULL;
-    if (_wfopen_s(&f, m_logPath, L"a") == 0 && f)
+    // Log initialization (write directly, no recursion)
     {
-        fprintf(f, "[%s] [%S-000] [INIT] [LOGGER] Logger initialized for component '%S'\n",
-            timeBuf, m_component, m_component);
-        fclose(f);
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char timeBuf[64];
+        sprintf_s(timeBuf, "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+        FILE* f = NULL;
+        if (_wfopen_s(&f, m_logPath, L"a") == 0 && f)
+        {
+            fprintf(f, "[%s] [%S-000] [INIT] [LOGGER] Logger initialized for component '%S'\n",
+                timeBuf, m_component, m_component);
+            fclose(f);
+        }
     }
-    LeaveCriticalSection(&m_cs);
 
     LeaveCriticalSection(&m_cs);
 }
@@ -129,16 +128,8 @@ void Logger::WriteLog(LogLevel level, const char* category, int uniqueId, const 
 
     char logLine[LOG_MAX_ENTRY + 128];
 
-    if (level >= LOG_ERROR)
-    {
-        sprintf_s(logLine, "[%s] [%S-%03d] [%s] [%s] %s\n",
-            timeBuf, m_component, uniqueId, LevelToString(level), category, message);
-    }
-    else
-    {
-        sprintf_s(logLine, "[%s] [%S-%03d] [%s] [%s] %s\n",
-            timeBuf, m_component, uniqueId, LevelToString(level), category, message);
-    }
+    sprintf_s(logLine, "[%s] [%S-%03d] [%s] [%s] %s\n",
+        timeBuf, m_component, uniqueId, LevelToString(level), category, message);
 
     EnterCriticalSection(&m_cs);
 

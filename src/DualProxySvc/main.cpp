@@ -4,12 +4,17 @@
 #include "logging.h"
 
 #define SERVICE_NAME L"DualProxySvc"
-#define SERVICE_DISPLAY_NAME L"DualProxy DualSense Bridge Service"
+#define PIPE_NAME L"\\\\.\\pipe\\DualProxySvc"
+#define SVC_MAIN "SVC_MAIN"
+#define SVC_IPC "SVC_IPC"
+#define SVC_BT   "SVC_BT"
 
 SERVICE_STATUS_HANDLE g_statusHandle = NULL;
 SERVICE_STATUS g_status = { 0 };
 DualSenseBridge g_bridge;
 HANDLE g_serviceStopEvent = NULL;
+HANDLE g_pipeThread = NULL;
+HANDLE g_bridgeThread = NULL;
 
 BOOL IsConsoleMode(int argc, wchar_t* argv[]);
 void WINAPI ServiceMain(DWORD argc, LPTSTR* argv);
@@ -17,10 +22,11 @@ void WINAPI ServiceCtrlHandler(DWORD ctrl);
 void RunAsConsole();
 void RunAsService();
 void ReportServiceStatus(DWORD state, DWORD exitCode, DWORD waitHint);
+DWORD WINAPI PipeServerThread(LPVOID lpParam);
+DWORD WINAPI BridgeThread(LPVOID lpParam);
 
 int wmain(int argc, wchar_t* argv[])
 {
-    // Initialize logging
     LOG_INIT(L"DualProxySvc");
 
     LOG_INFO(SVC_MAIN, 1, "DualProxySvc starting, argc=%d", argc);
@@ -68,6 +74,9 @@ void RunAsConsole()
         return;
     }
 
+    // Start pipe server thread
+    g_pipeThread = CreateThread(NULL, 0, PipeServerThread, NULL, 0, NULL);
+
     LOG_INFO(SVC_MAIN, 12, "Bridge initialized. Running main loop.");
     printf("DualProxySvc running in console mode. Press Ctrl+C to stop.\n");
 
@@ -85,7 +94,7 @@ void RunAsService()
 
     if (!StartServiceCtrlDispatcher(serviceTable))
     {
-        LOG_CRITICAL(SVC_MAIN, 20, "StartServiceCtrlDispatcher failed, error=%d", GetLastError());
+        LOG_CRITICAL(SVC_MAIN, 20, "StartServiceCtrlDispatcher failed, error=%lu", GetLastError());
     }
 }
 
@@ -96,20 +105,17 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv)
 
     LOG_INFO(SVC_MAIN, 30, "ServiceMain entered");
 
-    // Register the service control handler
     g_statusHandle = RegisterServiceCtrlHandler(SERVICE_NAME, ServiceCtrlHandler);
     if (!g_statusHandle)
     {
-        LOG_CRITICAL(SVC_MAIN, 31, "RegisterServiceCtrlHandler failed, error=%d", GetLastError());
+        LOG_CRITICAL(SVC_MAIN, 31, "RegisterServiceCtrlHandler failed, error=%lu", GetLastError());
         return;
     }
 
-    // Initial status
     g_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     g_status.dwServiceSpecificExitCode = 0;
     ReportServiceStatus(SERVICE_START_PENDING, NO_ERROR, 3000);
 
-    // Create stop event
     g_serviceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!g_serviceStopEvent)
     {
@@ -119,7 +125,6 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv)
 
     ReportServiceStatus(SERVICE_RUNNING, NO_ERROR, 0);
 
-    // Initialize and run the bridge
     if (!g_bridge.Initialize())
     {
         LOG_CRITICAL(SVC_MAIN, 32, "Bridge initialization failed in service mode");
@@ -127,13 +132,192 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv)
         return;
     }
 
-    LOG_INFO(SVC_MAIN, 33, "Service running, starting bridge loop");
-    g_bridge.Run();
+    // Start pipe server thread for tray IPC
+    g_pipeThread = CreateThread(NULL, 0, PipeServerThread, NULL, 0, NULL);
+    if (!g_pipeThread)
+    {
+        LOG_CRITICAL(SVC_MAIN, 36, "Failed to create pipe server thread, error=%lu", GetLastError());
+        ReportServiceStatus(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR, 0);
+        return;
+    }
 
-    // Cleanup
+    // Run bridge on a separate thread so service control handler can respond
+    g_bridgeThread = CreateThread(NULL, 0, BridgeThread, NULL, 0, NULL);
+    if (!g_bridgeThread)
+    {
+        LOG_CRITICAL(SVC_MAIN, 37, "Failed to create bridge thread, error=%lu", GetLastError());
+        ReportServiceStatus(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR, 0);
+        return;
+    }
+
+    // Wait for bridge to finish
+    WaitForSingleObject(g_bridgeThread, INFINITE);
+    CloseHandle(g_bridgeThread);
+    g_bridgeThread = NULL;
+
+    // Signal pipe server to stop
+    if (g_pipeThread)
+    {
+        WaitForSingleObject(g_pipeThread, 5000);
+        CloseHandle(g_pipeThread);
+        g_pipeThread = NULL;
+    }
+
     LOG_INFO(SVC_MAIN, 34, "Bridge loop ended, stopping service");
     CloseHandle(g_serviceStopEvent);
     ReportServiceStatus(SERVICE_STOPPED, NO_ERROR, 0);
+}
+
+DWORD WINAPI BridgeThread(LPVOID lpParam)
+{
+    UNREFERENCED_PARAMETER(lpParam);
+    LOG_INFO(SVC_MAIN, 33, "Service running, starting bridge loop on thread");
+    g_bridge.Run();
+    return 0;
+}
+
+DWORD WINAPI PipeServerThread(LPVOID lpParam)
+{
+    UNREFERENCED_PARAMETER(lpParam);
+
+    LOG_INFO(SVC_IPC, 501, "Named pipe server thread started");
+
+    HANDLE stopEvent = g_serviceStopEvent;
+
+    for (;;)
+    {
+        // Check for stop signal
+        if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0)
+        {
+            break;
+        }
+
+        HANDLE pipe = CreateNamedPipeW(
+            PIPE_NAME,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            512,
+            512,
+            0,
+            NULL
+        );
+
+        if (pipe == INVALID_HANDLE_VALUE)
+        {
+            LOG_ERROR(SVC_IPC, 502, "CreateNamedPipe failed, error=%lu", GetLastError());
+            Sleep(1000);
+            continue;
+        }
+
+        // Async connect so we can abort on stop signal
+        OVERLAPPED ov = { 0 };
+        ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (!ov.hEvent)
+        {
+            CloseHandle(pipe);
+            continue;
+        }
+
+        BOOL connected = ConnectNamedPipe(pipe, &ov);
+        if (!connected && GetLastError() == ERROR_IO_PENDING)
+        {
+            HANDLE events[2] = { stopEvent, ov.hEvent };
+            DWORD waitResult = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+            if (waitResult == WAIT_OBJECT_0)
+            {
+                CancelIo(pipe);
+                CloseHandle(ov.hEvent);
+                CloseHandle(pipe);
+                break;
+            }
+            DWORD dummy;
+            GetOverlappedResult(pipe, &ov, &dummy, FALSE);
+            connected = TRUE;
+        }
+        else if (!connected && GetLastError() == ERROR_PIPE_CONNECTED)
+        {
+            connected = TRUE;
+        }
+
+        CloseHandle(ov.hEvent);
+
+        if (!connected)
+        {
+            LOG_WARN(SVC_IPC, 503, "ConnectNamedPipe failed, error=%lu", GetLastError());
+            CloseHandle(pipe);
+            continue;
+        }
+
+        // Read command
+        wchar_t command[64] = { 0 };
+        DWORD bytesRead;
+        BOOL ok = ReadFile(pipe, command, sizeof(command) - sizeof(wchar_t), &bytesRead, NULL);
+        if (!ok)
+        {
+            CloseHandle(pipe);
+            continue;
+        }
+        command[bytesRead / sizeof(wchar_t)] = L'\0';
+
+        LOG_DEBUG(SVC_IPC, 504, "Pipe command received: %S", command);
+
+        // Process command
+        wchar_t response[64] = { 0 };
+
+        if (wcscmp(command, L"ENABLE") == 0)
+        {
+            if (g_bridge.Activate())
+            {
+                wcscpy_s(response, L"OK");
+                LOG_INFO(SVC_IPC, 505, "ENABLE command processed successfully");
+            }
+            else
+            {
+                wcscpy_s(response, L"FAIL");
+                LOG_WARN(SVC_IPC, 506, "ENABLE command failed");
+            }
+        }
+        else if (wcscmp(command, L"DISABLE") == 0)
+        {
+            if (g_bridge.Deactivate())
+            {
+                wcscpy_s(response, L"OK");
+                LOG_INFO(SVC_IPC, 507, "DISABLE command processed successfully");
+            }
+            else
+            {
+                wcscpy_s(response, L"FAIL");
+                LOG_WARN(SVC_IPC, 508, "DISABLE command failed");
+            }
+        }
+        else if (wcscmp(command, L"STATUS") == 0)
+        {
+            if (g_bridge.IsBtConnected())
+            {
+                wcscpy_s(response, g_bridge.IsActive() ? L"active" : L"inactive");
+            }
+            else
+            {
+                wcscpy_s(response, L"disconnected");
+            }
+        }
+        else
+        {
+            wcscpy_s(response, L"UNKNOWN");
+            LOG_WARN(SVC_IPC, 509, "Unknown command: %S", command);
+        }
+
+        // Send response
+        DWORD bytesWritten;
+        WriteFile(pipe, response, (DWORD)((wcslen(response) + 1) * sizeof(wchar_t)), &bytesWritten, NULL);
+
+        FlushFileBuffers(pipe);
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+    }
+
+    return 0;
 }
 
 void WINAPI ServiceCtrlHandler(DWORD ctrl)

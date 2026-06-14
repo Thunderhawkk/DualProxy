@@ -9,14 +9,18 @@
 #>
 
 param(
-    [string]$SolutionDir = "$PSScriptRoot\..\src",
-    [string]$DriverInfPath = "$SolutionDir\VirtualDualSense\Release\VirtualDualSense.inf",
-    [string]$DriverSysPath = "$SolutionDir\VirtualDualSense\Release\VirtualDualSense.sys",
-    [string]$ServiceExePath = "$SolutionDir\DualProxySvc\Release\DualProxySvc.exe",
-    [string]$TrayExePath = "$SolutionDir\DualProxyTray\Release\DualProxyTray.exe"
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Release",
+    [string]$Platform = "x64",
+    [string]$SolutionDir = "$PSScriptRoot\..\src"
 )
 
-$DevConPath = "$PSScriptRoot\devcon.exe"
+$DriverInfPath = "$SolutionDir\VirtualDualSense\VirtualDualSense.inf"
+$DriverSysPath = "$SolutionDir\$Platform\$Configuration\VirtualDualSense.sys"
+$ServiceExePath = "$SolutionDir\$Platform\$Configuration\DualProxySvc.exe"
+$TrayExePath = "$SolutionDir\$Platform\$Configuration\DualProxyTray.exe"
+
+$DevConPath = Resolve-Path (Join-Path $PSScriptRoot "..\Drivers\devcon.exe")
 $DriverDest = "$env:SystemRoot\System32\drivers\VirtualDualSense.sys"
 $ServiceName = "DualProxySvc"
 $DriverName = "VirtualDualSense"
@@ -184,7 +188,7 @@ function Install-Service {
 
     # Create service
     New-Service -Name $ServiceName `
-        -BinaryPathName "`"$ServiceExePath`"" `
+        -BinaryPathName "`"$ServiceExePath`" -s" `
         -DisplayName "DualProxy DualSense Bridge Service" `
         -StartupType Automatic `
         -Description "Forwards input/output between a real Bluetooth DualSense controller and a virtual USB DualSense device" `
