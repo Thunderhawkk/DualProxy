@@ -509,6 +509,33 @@ function Install-Driver {
     }
     Write-Success "Driver installation completed"
 
+    # Force-restart the device to clear the "need to reboot" flag
+    # Root-enumerated devices often get marked as needing restart even when functional
+    Start-Sleep -Seconds 2
+    $rootDevice = Get-PnpDevice | Where-Object { $_.InstanceId -match '^ROOT\\VirtualDualSense' } | Select-Object -First 1
+    if ($rootDevice) {
+        Write-Warn "Restarting device '$($rootDevice.InstanceId)' to clear pending restart flag..."
+        Restart-PnpDevice -InstanceId $rootDevice.InstanceId -Confirm:$false
+        Start-Sleep -Seconds 5
+        # Re-check sideband device
+        $rebootOk = $false
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                $handle = [System.IO.File]::Open($SidebandDevice, 'Open', 'Read', 'Write')
+                $handle.Close()
+                $rebootOk = $true
+                Write-Success "Sideband device accessible after restart"
+                break
+            } catch {
+                Write-Warn "Re-checking sideband device (attempt $i/3)..."
+                Start-Sleep -Seconds 2
+            }
+        }
+        if (-not $rebootOk) {
+            Write-Warn "Device not accessible after restart. A reboot may still be needed."
+        }
+    }
+
     Start-Sleep -Seconds 3
 }
 
