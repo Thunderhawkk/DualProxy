@@ -16,6 +16,7 @@ struct DualSenseDevice {
     USHORT Vid;
     USHORT Pid;
     bool IsBluetooth;
+    DWORD InputReportByteLength;
 };
 
 class HIDApi {
@@ -26,6 +27,9 @@ public:
     // Read input report (blocking with timeout)
     static bool ReadInput(HANDLE handle, BYTE* buffer, DWORD size, DWORD timeoutMs = 100);
 
+    // Read input report using device path (opens fresh handle each time)
+    static bool ReadInputFromPath(const wchar_t* devicePath, BYTE* buffer, DWORD size, DWORD timeoutMs = 100);
+
     // Write output report
     static bool WriteOutput(HANDLE handle, const BYTE* buffer, DWORD size);
 
@@ -35,8 +39,13 @@ public:
     // Get feature report
     static bool GetFeature(HANDLE handle, BYTE* buffer, DWORD size);
 
+    // Get HID input report length
+    static DWORD GetInputReportSize(HANDLE handle);
+
     // Close device handle
     static void Close(HANDLE& handle);
+
+private:
 
 private:
     static bool GetDeviceAttributes(HANDLE handle, USHORT& vid, USHORT& pid);

@@ -19,6 +19,7 @@ DualSenseBridge::DualSenseBridge()
     m_btDevice.Vid = 0;
     m_btDevice.Pid = 0;
     m_btDevice.IsBluetooth = false;
+    m_btDevice.InputReportByteLength = 0;
     m_btDevice.DevicePath[0] = L'\0';
     m_btDevice.Serial[0] = L'\0';
 
@@ -101,8 +102,9 @@ bool DualSenseBridge::FindBtController()
 
         m_btDevice = device;
         m_btConnected = true;
-        LOG_INFO(SVC_BT, 200, "BT DualSense found: VID=0x%04X PID=0x%04X BT=%s Serial=%S",
-            device.Vid, device.Pid, device.IsBluetooth ? "yes" : "no", device.Serial);
+        LOG_INFO(SVC_BT, 200, "BT DualSense found: VID=0x%04X PID=0x%04X report=%uB BT=%s Serial=%S",
+            device.Vid, device.Pid, device.InputReportByteLength,
+            device.IsBluetooth ? "yes" : "no", device.Serial);
         return true;
     }
 
@@ -293,11 +295,15 @@ void DualSenseBridge::Run()
         return;
     }
 
-    BYTE btInput[78];
+    BYTE rawInput[78];
     BYTE usbInput[64];
     BYTE usbOutput[48];
     BYTE btOutput[78];
     DWORD btOutputSize = 0;
+    DWORD inputReportSize = m_btDevice.InputReportByteLength;
+    bool isBtFormat = (inputReportSize == BT_INPUT_REPORT_SIZE);
+    LOG_INFO(SVC_CONV, 502, "DualSense connection type: %s, input report size: %d",
+        isBtFormat ? "BT Native" : "USB Proxy", inputReportSize);
 
     while (WaitForSingleObject(m_stopEvent, 0) == WAIT_TIMEOUT)
     {
@@ -309,11 +315,14 @@ void DualSenseBridge::Run()
                 Sleep(1000);
                 continue;
             }
+            inputReportSize = m_btDevice.InputReportByteLength;
+            isBtFormat = (inputReportSize == BT_INPUT_REPORT_SIZE);
+            LOG_INFO(SVC_CONV, 503, "Reconnected, input report size: %d", inputReportSize);
         }
 
-        // 1. Read BT input report
-        ZeroMemory(btInput, sizeof(btInput));
-        if (!HIDApi::ReadInput(m_btDevice.Handle, btInput, sizeof(btInput), 100))
+        // 1. Read input report (open fresh handle each time for reliability)
+        ZeroMemory(rawInput, sizeof(rawInput));
+        if (!HIDApi::ReadInputFromPath(m_btDevice.DevicePath, rawInput, inputReportSize, 100))
         {
             DWORD err = GetLastError();
             if (err == ERROR_DEVICE_NOT_CONNECTED || err == ERROR_FILE_NOT_FOUND)
@@ -322,34 +331,65 @@ void DualSenseBridge::Run()
                 HIDApi::Close(m_btDevice.Handle);
                 continue;
             }
-            // Normal timeout - no new input, still alive
-            // Don't log every timeout to avoid log spam
+            if (err != ERROR_TIMEOUT)
+            {
+                LOG_DEBUG(SVC_BT, 205, "ReadInput failed, err=%d", err);
+            }
         }
         else
         {
-            // 2. Convert BT to USB format
-            ZeroMemory(usbInput, sizeof(usbInput));
-            if (BtToUsbInputReport(btInput, sizeof(btInput), usbInput, sizeof(usbInput)))
+            if (isBtFormat)
             {
-                // Set sequence number
+                // 78-byte native BT format — remap bytes to USB layout.
+                // BT layout (byte 5+ differs from USB):
+                //   BT[5] = D-pad(lo) + face buttons(hi)   — same bit positions as USB
+                //   BT[6] = L1,R1,L2,R2,Create,Options,L3,R3
+                //   BT[7] = PS,Touchpad,Mic,padding
+                //   BT[8] = L2 analog
+                //   BT[9] = R2 analog
+                // USB layout:
+                //   USB[5] = L2 analog   USB[8] = D-pad(lo) + face buttons(hi)
+                //   USB[6] = R2 analog   USB[9] = Buttons2   USB[10] = Buttons3
+                ZeroMemory(usbInput, sizeof(usbInput));
+                usbInput[0] = rawInput[0];             // Report ID
+                usbInput[1] = rawInput[1];             // LeftX
+                usbInput[2] = rawInput[2];             // LeftY
+                usbInput[3] = rawInput[3];             // RightX
+                usbInput[4] = rawInput[4];             // RightY
+                usbInput[5] = rawInput[8];             // L2 analog (BT byte 8 → USB byte 5)
+                usbInput[6] = rawInput[9];             // R2 analog (BT byte 9 → USB byte 6)
                 usbInput[7] = (BYTE)(++m_sequenceCounter & 0xFF);
-
-                // 3. Submit to virtual controller
-                if (m_active)
-                {
-                    if (!SubmitInputReport(usbInput, sizeof(usbInput)))
-                    {
-                        LOG_ERROR(SVC_IOCTL, 402, "Failed to submit input report");
-                    }
-                }
+                usbInput[8] = rawInput[5];             // D-pad + face buttons — same bit layout!
+                usbInput[9] = rawInput[6];             // L1,R1,L2-click,R2-click,Create,Options,L3,R3
+                usbInput[10] = rawInput[7];            // PS,Touchpad,Mic
             }
             else
             {
-                LOG_WARN(SVC_CONV, 500, "Failed to convert BT input report, size=%d", sizeof(btInput));
+                // 64-byte USB proxy — data already in USB format
+                ZeroMemory(usbInput, sizeof(usbInput));
+                CopyMemory(usbInput, rawInput, min(inputReportSize, sizeof(usbInput)));
+                usbInput[7] = (BYTE)(++m_sequenceCounter & 0xFF);
+            }
+
+            if (m_active)
+            {
+                if (!SubmitInputReport(usbInput, sizeof(usbInput)))
+                {
+                    LOG_ERROR(SVC_IOCTL, 402, "Failed to submit input report");
+                }
+                else
+                {
+                    static int heartbeat = 0;
+                    if (++heartbeat % 600 == 0)
+                    {
+                        LOG_DEBUG(SVC_CONV, 521, "Heartbeat: l2=%d r2=%d dpt=%02X seq=%d",
+                            usbInput[5], usbInput[6], usbInput[8], m_sequenceCounter);
+                    }
+                }
             }
         }
 
-        // 4. Check for output reports (haptics, LEDs from games)
+        // 3. Check for output reports (haptics, LEDs from games)
         if (m_active)
         {
             ZeroMemory(usbOutput, sizeof(usbOutput));
@@ -366,7 +406,6 @@ void DualSenseBridge::Run()
                 {
                     if (!ForwardOutputToBT(btOutput, btOutputSize))
                     {
-                        // Try writing to BT handle again - it might be stale
                         LOG_ERROR(SVC_BT, 203, "Failed to write output to BT controller, error=%d",
                             GetLastError());
                     }
