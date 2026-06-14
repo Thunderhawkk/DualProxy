@@ -4,8 +4,8 @@
 
 [Version]
 Signature="$WINDOWS NT$"
-Class=HIDClass
-ClassGuid={745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Class=System
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider=%ManufacturerName%
 DriverVer=06/14/2026,1.0.0.0
 CatalogFile=VirtualDualSense.cat
@@ -30,6 +30,12 @@ VirtualDualSense.CopyFiles = 12
 CopyFiles = VirtualDualSense.CopyFiles
 AddReg = VirtualDualSense.AddReg
 
+[RootInstall.NTamd64.HW]
+AddReg = VhfLowerFilter.AddReg
+
+[VhfLowerFilter.AddReg]
+HKR,,"LowerFilters",0x00010008,"vhf"
+
 [RootInstall.NTamd64.Services]
 AddService = VirtualDualSense, 0x00000002, VirtualDualSense.Service
 
@@ -51,6 +57,6 @@ KmdfLibraryVersion = 1.33
 
 [Strings]
 ManufacturerName = "DualProxy"
-DeviceDescription = "Virtual DualSense Controller"
+DeviceDescription = "DualSense Wireless Controller"
 ServiceName = "VirtualDualSense"
 DiskName = "Virtual DualSense Installation Media"

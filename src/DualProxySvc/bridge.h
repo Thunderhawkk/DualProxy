@@ -8,16 +8,12 @@
 
 #define SIDEBAND_DEVICE_PATH L"\\\\.\\VirtualDualSense0"
 
-// CTL_CODE values must match kernel driver.h:
-//   CTL_CODE(0x8601, Function, METHOD_BUFFERED, FILE_ANY_ACCESS)
-//   = ((0x8601) << 16) | (FILE_ANY_ACCESS << 14) | (Function << 2) | METHOD_BUFFERED
-//   = 0x8601A000 + (Function << 2)
-
-#define VDS_ACTIVATE         ((DWORD)CTL_CODE(0x8601, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS))
-#define VDS_DEACTIVATE       ((DWORD)CTL_CODE(0x8601, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS))
-#define VDS_SUBMIT_INPUT     ((DWORD)CTL_CODE(0x8601, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS))
-#define VDS_READ_OUTPUT      ((DWORD)CTL_CODE(0x8601, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS))
-#define VDS_GET_OUTPUT_COUNT ((DWORD)CTL_CODE(0x8601, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS))
+#define VDS_ACTIVATE         0x222000
+#define VDS_DEACTIVATE       0x222004
+#define VDS_SUBMIT_INPUT     0x222008
+#define VDS_READ_OUTPUT      0x22200C
+#define VDS_GET_OUTPUT_COUNT 0x222010
+#define VDS_PING             0x222014
 
 class DualSenseBridge {
 public:
@@ -29,7 +25,9 @@ public:
     void Stop();
     bool Activate();
     bool Deactivate();
+    bool Ping();
     bool IsActive() const { return m_active; }
+    DWORD GetLastActivateError() const { return m_lastActivateError; }
     bool IsBtConnected() const { return m_btConnected; }
 
 private:
@@ -47,4 +45,5 @@ private:
     bool m_active;
     bool m_btConnected;
     int  m_sequenceCounter;
+    DWORD m_lastActivateError;
 };

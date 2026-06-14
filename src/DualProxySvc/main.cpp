@@ -123,8 +123,6 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv)
         return;
     }
 
-    ReportServiceStatus(SERVICE_RUNNING, NO_ERROR, 0);
-
     if (!g_bridge.Initialize())
     {
         LOG_CRITICAL(SVC_MAIN, 32, "Bridge initialization failed in service mode");
@@ -149,6 +147,30 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv)
         ReportServiceStatus(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR, 0);
         return;
     }
+
+    // Wait for bridge to activate (or fail)
+    for (int i = 0; i < 50; i++) // 5 second timeout
+    {
+        if (g_bridge.IsActive())
+        {
+            break;
+        }
+        if (WaitForSingleObject(g_bridgeThread, 100) == WAIT_OBJECT_0)
+        {
+            LOG_CRITICAL(SVC_MAIN, 38, "Bridge thread exited before activation");
+            ReportServiceStatus(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR, 0);
+            return;
+        }
+    }
+
+    if (!g_bridge.IsActive())
+    {
+        LOG_CRITICAL(SVC_MAIN, 39, "Bridge activation timeout");
+        ReportServiceStatus(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR, 0);
+        return;
+    }
+
+    ReportServiceStatus(SERVICE_RUNNING, NO_ERROR, 0);
 
     // Wait for bridge to finish
     WaitForSingleObject(g_bridgeThread, INFINITE);

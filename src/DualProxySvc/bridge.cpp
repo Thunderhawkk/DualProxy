@@ -13,6 +13,7 @@ DualSenseBridge::DualSenseBridge()
     , m_active(false)
     , m_btConnected(false)
     , m_sequenceCounter(0)
+    , m_lastActivateError(0)
 {
     m_btDevice.Handle = INVALID_HANDLE_VALUE;
     m_btDevice.Vid = 0;
@@ -110,12 +111,34 @@ bool DualSenseBridge::FindBtController()
     return false;
 }
 
+bool DualSenseBridge::Ping()
+{
+    DWORD bytesReturned;
+    BOOL ok = DeviceIoControl(
+        m_sidebandHandle,
+        VDS_PING,
+        NULL, 0UL,
+        NULL, 0UL,
+        &bytesReturned,
+        NULL
+    );
+    if (!ok)
+    {
+        LOG_ERROR(SVC_IOCTL, 310, "VDS_PING failed, error=%lu", GetLastError());
+        return false;
+    }
+    LOG_INFO(SVC_IOCTL, 311, "VDS_PING succeeded");
+    return true;
+}
+
 bool DualSenseBridge::Activate()
 {
     if (m_active)
     {
         return true;
     }
+
+    LOG_DEBUG(SVC_VHF, 300, "Sending VDS_ACTIVATE IOCTL: 0x%08X", VDS_ACTIVATE);
 
     DWORD bytesReturned;
     BOOL ok = DeviceIoControl(
@@ -129,7 +152,8 @@ bool DualSenseBridge::Activate()
 
     if (!ok)
     {
-        LOG_ERROR(SVC_VHF, 300, "VDS_ACTIVATE failed, error=%lu", GetLastError());
+        m_lastActivateError = GetLastError();
+        LOG_ERROR(SVC_VHF, 300, "VDS_ACTIVATE failed, error=%lu", m_lastActivateError);
         return false;
     }
 
@@ -250,6 +274,17 @@ int DualSenseBridge::GetOutputReportCount()
 void DualSenseBridge::Run()
 {
     LOG_INFO(SVC_MAIN, 2, "Bridge main loop started");
+
+    // DEBUG: Test IOCTL path with PING
+    if (Ping())
+    {
+        LOG_INFO(SVC_IOCTL, 312, "PING OK - IOCTL handler reachable");
+    }
+    else
+    {
+        LOG_CRITICAL(SVC_IOCTL, 313, "PING FAILED - IOCTL handler NOT reachable");
+        return;
+    }
 
     // Activate VHF
     if (!Activate())

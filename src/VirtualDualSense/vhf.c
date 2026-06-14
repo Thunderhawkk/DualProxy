@@ -1,5 +1,29 @@
 #include "vhf.h"
 
+static
+VOID
+WriteDiagnosticStatus(
+    _In_ PCWSTR ValueName,
+    _In_ NTSTATUS Status
+)
+{
+    HANDLE keyHandle;
+    UNICODE_STRING keyName;
+    OBJECT_ATTRIBUTES objAttr;
+
+    RtlInitUnicodeString(&keyName, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\VirtualDualSense");
+    InitializeObjectAttributes(&objAttr, &keyName, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    NTSTATUS regStatus = ZwOpenKey(&keyHandle, KEY_SET_VALUE, &objAttr);
+    if (NT_SUCCESS(regStatus))
+    {
+        UNICODE_STRING valueName;
+        RtlInitUnicodeString(&valueName, ValueName);
+        ZwSetValueKey(keyHandle, &valueName, 0, REG_DWORD, &Status, sizeof(Status));
+        ZwClose(keyHandle);
+    }
+}
+
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, VhfActivate)
 #pragma alloc_text(PAGE, VhfDeactivate)
@@ -20,36 +44,89 @@ VhfActivate(
         return STATUS_SUCCESS;
     }
 
+    PDEVICE_OBJECT wdmDevice = WdfDeviceWdmGetDeviceObject(DeviceContext->WdfDevice);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "VirtualDualSense: VhfActivate - FDO=0x%p\n", wdmDevice);
+
+    if (wdmDevice == NULL)
+    {
+        WriteDiagnosticStatus(L"VhfCreateStatus", 0xC0000001);
+        return STATUS_INVALID_PARAMETER;
+    }
+
     VHF_CONFIG_INIT(
         &vhfConfig,
-        WdfDeviceWdmGetDeviceObject(DeviceContext->WdfDevice),
+        wdmDevice,
         DUALSENSE_HID_DESCRIPTOR_SIZE,
         (PUCHAR)DualSenseHidDescriptor
     );
 
-    vhfConfig.VendorID = DUALSENSE_VID;
-    vhfConfig.ProductID = DUALSENSE_PID;
-    vhfConfig.VersionNumber = DUALSENSE_VERSION;
-    vhfConfig.VhfClientContext = DeviceContext;
+    // vhf.sys (build 26100) might expect a smaller structure size
+    // than what WDK 10.0.28000.0's sizeof(VHF_CONFIG) produces.
+    // Override Size to match what the running vhf.sys expects.
+    vhfConfig.Size = sizeof(VHF_CONFIG);
+
+    vhfConfig.VendorID = 0x054C;
+    vhfConfig.ProductID = 0x0CE6;
+    vhfConfig.VersionNumber = 0x8100;
+
+    {
+        HANDLE keyHandle;
+        UNICODE_STRING keyName;
+        OBJECT_ATTRIBUTES objAttr;
+        RtlInitUnicodeString(&keyName, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\VirtualDualSense");
+        InitializeObjectAttributes(&objAttr, &keyName, OBJ_KERNEL_HANDLE, NULL, NULL);
+        if (NT_SUCCESS(ZwOpenKey(&keyHandle, KEY_SET_VALUE, &objAttr))) {
+            UNICODE_STRING vn;
+            RtlInitUnicodeString(&vn, L"DescSize");
+            ULONG ds = DUALSENSE_HID_DESCRIPTOR_SIZE;
+            ZwSetValueKey(keyHandle, &vn, 0, REG_DWORD, &ds, sizeof(ds));
+            RtlInitUnicodeString(&vn, L"ConfigSize");
+            ULONG cs = vhfConfig.Size;
+            ZwSetValueKey(keyHandle, &vn, 0, REG_DWORD, &cs, sizeof(cs));
+            ZwClose(keyHandle);
+        }
+    }
+
     vhfConfig.EvtVhfAsyncOperationWriteReport = VirtualDualSenseEvtVhfAsyncWriteReport;
     vhfConfig.EvtVhfAsyncOperationGetFeature = VirtualDualSenseEvtVhfAsyncGetFeature;
     vhfConfig.EvtVhfAsyncOperationSetFeature = VirtualDualSenseEvtVhfAsyncSetFeature;
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "VirtualDualSense: VhfActivate - Size=%lu ClientCtx=0x%p DevObj=0x%p "
+        "VID=0x%04X PID=0x%04X Ver=0x%04X DescLen=%hu Desc=0x%p\n",
+        vhfConfig.Size, vhfConfig.VhfClientContext, vhfConfig.DeviceObject,
+        vhfConfig.VendorID, vhfConfig.ProductID, vhfConfig.VersionNumber,
+        vhfConfig.ReportDescriptorLength, vhfConfig.ReportDescriptor);
+
     status = VhfCreate(&vhfConfig, &DeviceContext->VhfHandle);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "VirtualDualSense: VhfCreate returned 0x%08X\n", status);
+    WriteDiagnosticStatus(L"VhfCreateStatus", status);
     if (!NT_SUCCESS(status))
     {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "VirtualDualSense: VhfCreate failed with status 0x%08X\n", status);
         return status;
     }
 
     status = VhfStart(DeviceContext->VhfHandle);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "VirtualDualSense: VhfStart returned 0x%08X\n", status);
+    WriteDiagnosticStatus(L"VhfStartStatus", status);
     if (!NT_SUCCESS(status))
     {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "VirtualDualSense: VhfStart failed with status 0x%08X\n", status);
         VhfDelete(DeviceContext->VhfHandle, TRUE);
         DeviceContext->VhfHandle = NULL;
         return status;
     }
 
     DeviceContext->VhfActive = TRUE;
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "VirtualDualSense: VhfActivate succeeded\n");
 
     return STATUS_SUCCESS;
 }

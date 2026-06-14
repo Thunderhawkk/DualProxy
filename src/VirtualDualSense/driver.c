@@ -1,4 +1,5 @@
 #include "driver.h"
+#include "vhf.h"
 #include <ntstrsafe.h>
 
 DRIVER_INITIALIZE DriverEntry;
@@ -122,13 +123,18 @@ VirtualDualSenseEvtDeviceAdd(
     // Create I/O queue for IOCTL dispatch
     {
         WDF_IO_QUEUE_CONFIG queueConfig;
-        WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchSequential);
+        WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
+        queueConfig.PowerManaged = WdfFalse;
         queueConfig.EvtIoDeviceControl = VirtualDualSenseEvtIoDeviceControl;
+
+        WDF_OBJECT_ATTRIBUTES queueAttrs;
+        WDF_OBJECT_ATTRIBUTES_INIT(&queueAttrs);
+        queueAttrs.ExecutionLevel = WdfExecutionLevelPassive;
 
         status = WdfIoQueueCreate(
             device,
             &queueConfig,
-            WDF_NO_OBJECT_ATTRIBUTES,
+            &queueAttrs,
             &ctx->IoQueue
         );
         if (!NT_SUCCESS(status))
@@ -147,11 +153,46 @@ VirtualDualSenseEvtDevicePrepareHardware(
     _In_ WDFCMRESLIST ResourceListTranslated
 )
 {
-    UNREFERENCED_PARAMETER(Device);
+    PDEVICE_CONTEXT ctx;
+    NTSTATUS status;
+
     UNREFERENCED_PARAMETER(ResourceList);
     UNREFERENCED_PARAMETER(ResourceListTranslated);
 
     PAGED_CODE();
+
+    ctx = GetDeviceContext(Device);
+
+    // Try to create and start VHF during device prepare hardware.
+    // This ensures the device stack is stable and we're at the right PnP state.
+    status = VhfActivate(ctx);
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "VirtualDualSense: EvtDevicePrepareHardware - VhfActivate failed 0x%08X - will retry via IOCTL\n", status);
+        {
+            HANDLE keyHandle;
+            UNICODE_STRING keyName;
+            OBJECT_ATTRIBUTES objAttr;
+            RtlInitUnicodeString(&keyName, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\VirtualDualSense");
+            InitializeObjectAttributes(&objAttr, &keyName, OBJ_KERNEL_HANDLE, NULL, NULL);
+            if (NT_SUCCESS(ZwOpenKey(&keyHandle, KEY_SET_VALUE, &objAttr))) {
+                UNICODE_STRING vn;
+                RtlInitUnicodeString(&vn, L"VhfCreatePH");
+                ZwSetValueKey(keyHandle, &vn, 0, REG_DWORD, &status, sizeof(status));
+                ZwClose(keyHandle);
+            }
+        }
+    }
+    else
+    {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "VirtualDualSense: EvtDevicePrepareHardware - VHF activated successfully\n");
+    }
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "VirtualDualSense: EvtDevicePrepareHardware - device ready\n");
+
     return STATUS_SUCCESS;
 }
 
