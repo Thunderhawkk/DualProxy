@@ -361,7 +361,7 @@ void DualSenseBridge::Run()
                 usbInput[7] = (BYTE)(++m_sequenceCounter & 0xFF);
                 usbInput[8] = rawInput[5];             // D-pad + face buttons — same bit layout!
                 usbInput[9] = rawInput[6];             // L1,R1,L2-click,R2-click,Create,Options,L3,R3
-                usbInput[10] = rawInput[7];            // PS,Touchpad,Mic
+                usbInput[10] = rawInput[7] & 0x03;     // PS(0), Touchpad(1) — bits 2-7 are vendor-defined
             }
             else
             {

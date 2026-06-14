@@ -1,5 +1,39 @@
 #include "report.h"
 #include <memory.h>
+#include <stdint.h>
+
+#define DS_OUTPUT_TAG       0x10
+#define DS_OUTPUT_REPORT_BT 0x31
+#define DS_CRC32_SEED       0xA2
+
+static uint32_t s_crc32_table[256] = { 0 };
+static bool s_crc32_init = false;
+
+static void InitCrc32Table()
+{
+    for (uint32_t i = 0; i < 256; i++)
+    {
+        uint32_t crc = i;
+        for (int j = 0; j < 8; j++)
+        {
+            if (crc & 1)
+                crc = (crc >> 1) ^ 0xEDB88320;
+            else
+                crc >>= 1;
+        }
+        s_crc32_table[i] = crc;
+    }
+    s_crc32_init = true;
+}
+
+static uint32_t Crc32Le(const uint8_t* data, size_t len, uint32_t seed)
+{
+    if (!s_crc32_init) InitCrc32Table();
+    uint32_t crc = seed;
+    for (size_t i = 0; i < len; i++)
+        crc = s_crc32_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    return crc;
+}
 
 BOOL IsBtFramedReport(const BYTE* report, DWORD size)
 {
@@ -14,8 +48,6 @@ BOOL BtToUsbInputReport(const BYTE* btReport, DWORD btSize, BYTE* usbReport, DWO
 
     if (IsBtFramedReport(btReport, btSize))
     {
-        // BT frame: [0xA1][ReportID][data 63 bytes][CRC/padding]
-        // Extract starting from ReportID (skip the 0xA1 header)
         DWORD dataLen = btSize - 1;
         if (dataLen > USB_INPUT_REPORT_SIZE)
             dataLen = USB_INPUT_REPORT_SIZE;
@@ -25,7 +57,6 @@ BOOL BtToUsbInputReport(const BYTE* btReport, DWORD btSize, BYTE* usbReport, DWO
     }
     else
     {
-        // Already in USB format (OS stripped BT header)
         DWORD copyLen = (btSize < usbSize) ? btSize : usbSize;
         memcpy(usbReport, btReport, copyLen);
         if (copyLen < usbSize)
@@ -38,12 +69,33 @@ BOOL UsbToBtOutputReport(const BYTE* usbReport, DWORD usbSize, BYTE* btReport, D
 {
     if (!usbReport || !btReport || !bytesWritten) return FALSE;
     if (btSize < BT_OUTPUT_REPORT_SIZE) return FALSE;
+    if (usbSize < USB_OUTPUT_REPORT_SIZE) return FALSE;
 
+    static BYTE s_outputSeq = 0;
+
+    // BT output format: [report_id=0x31][seq_tag][tag=0x10][common data 71 bytes][crc32 4 bytes]
     memset(btReport, 0, btSize);
-    btReport[0] = BT_HIDP_HEADER_OUTPUT;
+    btReport[0] = DS_OUTPUT_REPORT_BT;
+    btReport[1] = (s_outputSeq << 4) | 0x00;
+    btReport[2] = DS_OUTPUT_TAG;
+    s_outputSeq = (s_outputSeq + 1) & 0x0F;
 
-    DWORD copyLen = (usbSize < (btSize - 1)) ? usbSize : (btSize - 1);
-    memcpy(btReport + 1, usbReport, copyLen);
+    // Common data (same as USB report from byte 1)
+    DWORD commonSize = usbSize - 1;
+    if (commonSize > 71) commonSize = 71;
+    memcpy(btReport + 3, usbReport + 1, commonSize);
+
+    // CRC32 over seed byte + entire report except last 4 bytes
+    uint8_t seed = DS_CRC32_SEED;
+    uint32_t crc = Crc32Le(NULL, 0, 0xFFFFFFFF);
+    crc = Crc32Le(&seed, 1, crc);
+    crc = Crc32Le(btReport, BT_OUTPUT_REPORT_SIZE - 4, crc);
+    crc = ~crc;
+
+    btReport[74] = (BYTE)(crc & 0xFF);
+    btReport[75] = (BYTE)((crc >> 8) & 0xFF);
+    btReport[76] = (BYTE)((crc >> 16) & 0xFF);
+    btReport[77] = (BYTE)((crc >> 24) & 0xFF);
 
     *bytesWritten = BT_OUTPUT_REPORT_SIZE;
     return TRUE;

@@ -293,9 +293,15 @@ bool HIDApi::WriteOutput(HANDLE handle, const BYTE* buffer, DWORD size)
         return false;
     }
 
-    // For Bluetooth DualSense, use HidD_SetOutputReport
-    // For USB DualSense, use WriteFile
-    // We try HidD_SetOutputReport first (works for both)
+    // Try synchronous WriteFile first (interrupt out pipe), then fall back to
+    // HidD_SetOutputReport (control pipe). BT DualSense often requires the
+    // control pipe for output reports.
+    DWORD bytesWritten = 0;
+    if (WriteFile(handle, buffer, size, &bytesWritten, NULL) && bytesWritten == size)
+    {
+        return true;
+    }
+
     return HidD_SetOutputReport(handle, (PVOID)buffer, size);
 }
 
