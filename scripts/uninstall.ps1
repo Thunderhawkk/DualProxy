@@ -192,7 +192,23 @@ if ($existingCert) {
     Write-Success "Test certificate not found"
 }
 
-# Step 9: Remove log directory
+# Step 9: Remove stale VHF HID device instances from previous installations
+Write-Step "Removing stale VHF HID device instances..."
+$staleCount = 0
+$staleDevices = Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
+    $_.InstanceId -match 'HID_DEVICE_SYSTEM_VHF' -and $_.Status -eq 'Unknown'
+}
+foreach ($dev in $staleDevices) {
+    $result = & $DevConPath remove "@$($dev.InstanceId)" 2>&1
+    $staleCount++
+}
+if ($staleCount -gt 0) {
+    Write-Success "Removed $staleCount stale VHF device(s)"
+} else {
+    Write-Success "No stale VHF devices found"
+}
+
+# Step 10: Remove log directory
 Write-Step "Removing log files..."
 if (Test-Path $LogPath) {
     try {
