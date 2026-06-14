@@ -82,9 +82,31 @@ if ($drvSvc) {
         cmd /c "sc stop $DriverName 2>&1" | Out-Null
         Start-Sleep -Seconds 2
     }
-    cmd /c "sc delete $DriverName 2>&1" | Out-Null
-    Start-Sleep -Seconds 1
-    Write-Success "Kernel driver service removed"
+    $removed = $false
+    for ($i = 0; $i -lt 5; $i++) {
+        $output = cmd /c "sc delete $DriverName 2>&1"
+        Start-Sleep -Seconds 1
+        $svcCheck = Get-Service -Name $DriverName -ErrorAction SilentlyContinue
+        if (-not $svcCheck) {
+            $removed = $true
+            break
+        }
+    }
+    if (-not $removed) {
+        # Fallback: nuke the service registry key directly
+        $keyPath = "SYSTEM\CurrentControlSet\Services\$DriverName"
+        cmd /c "reg delete `"HKLM\$keyPath`" /f 2>&1" | Out-Null
+        $svcCheck = Get-Service -Name $DriverName -ErrorAction SilentlyContinue
+        if (-not $svcCheck) {
+            $removed = $true
+        }
+    }
+    if ($removed) {
+        Write-Success "Kernel driver service removed"
+    } else {
+        Write-Fail "Could not remove kernel driver service"
+        $allClean = $false
+    }
 } else {
     Write-Success "Kernel driver service not found"
 }
