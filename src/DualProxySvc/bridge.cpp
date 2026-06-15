@@ -23,6 +23,14 @@ DualSenseBridge::DualSenseBridge()
     m_btDevice.DevicePath[0] = L'\0';
     m_btDevice.Serial[0] = L'\0';
 
+    m_usbDevice.Handle = INVALID_HANDLE_VALUE;
+    m_usbDevice.Vid = 0;
+    m_usbDevice.Pid = 0;
+    m_usbDevice.IsBluetooth = false;
+    m_usbDevice.InputReportByteLength = 0;
+    m_usbDevice.DevicePath[0] = L'\0';
+    m_usbDevice.Serial[0] = L'\0';
+
     m_stopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 }
 
@@ -92,20 +100,39 @@ void DualSenseBridge::CloseSideband()
 
 bool DualSenseBridge::FindBtController()
 {
-    DualSenseDevice device;
-    if (HIDApi::FindDualSense(device))
+    DualSenseDevice inputDev, outputDev;
+    if (HIDApi::FindDualSense(inputDev, outputDev))
     {
         if (m_btDevice.Handle != INVALID_HANDLE_VALUE)
         {
             HIDApi::Close(m_btDevice.Handle);
         }
 
-        m_btDevice = device;
-        m_btConnected = true;
-        LOG_INFO(SVC_BT, 200, "BT DualSense found: VID=0x%04X PID=0x%04X report=%uB BT=%s Serial=%S",
-            device.Vid, device.Pid, device.InputReportByteLength,
-            device.IsBluetooth ? "yes" : "no", device.Serial);
-        return true;
+        if (m_usbDevice.Handle != INVALID_HANDLE_VALUE)
+        {
+            HIDApi::Close(m_usbDevice.Handle);
+        }
+
+        m_usbDevice = outputDev;
+
+        // Only accept 78-byte native BT as input source
+        if (inputDev.InputReportByteLength > USB_INPUT_REPORT_SIZE)
+        {
+            m_btDevice = inputDev;
+            m_btConnected = true;
+
+            LOG_INFO(SVC_BT, 200, "BT DualSense found: IN=%uB native BT, OUT=%uB USB proxy Serial=%S",
+                inputDev.InputReportByteLength,
+                outputDev.Handle != INVALID_HANDLE_VALUE ? outputDev.InputReportByteLength : 0,
+                inputDev.Serial);
+            return true;
+        }
+
+        // Only 64-byte USB proxy found — wait for BT to reconnect
+        LOG_DEBUG(SVC_BT, 208, "Found only USB proxy (64B), waiting for BT native device");
+        HIDApi::Close(inputDev.Handle);
+        m_btConnected = false;
+        return false;
     }
 
     m_btConnected = false;
@@ -243,16 +270,6 @@ bool DualSenseBridge::ReadOutputReport(BYTE* report, DWORD* size)
     return (bytesReturned > 0);
 }
 
-bool DualSenseBridge::ForwardOutputToBT(const BYTE* report, DWORD size)
-{
-    if (m_btDevice.Handle == INVALID_HANDLE_VALUE)
-    {
-        return false;
-    }
-
-    return HIDApi::WriteOutput(m_btDevice.Handle, report, size);
-}
-
 int DualSenseBridge::GetOutputReportCount()
 {
     BYTE countBuf[4] = { 0 };
@@ -362,6 +379,31 @@ void DualSenseBridge::Run()
                 usbInput[8] = rawInput[5];             // D-pad + face buttons — same bit layout!
                 usbInput[9] = rawInput[6];             // L1,R1,L2-click,R2-click,Create,Options,L3,R3
                 usbInput[10] = rawInput[7] & 0x03;     // PS(0), Touchpad(1) — bits 2-7 are vendor-defined
+
+                // Copy vendor extended data (touchpad, IMU, battery) — same layout as USB
+                if (inputReportSize > 11)
+                {
+                    DWORD vendorSize = min(inputReportSize, (DWORD)sizeof(usbInput)) - 11;
+                    if (vendorSize > 0 && vendorSize <= 52)
+                        memcpy(usbInput + 11, rawInput + 11, vendorSize);
+                }
+
+                // Diagnostic: dump vendor bytes once to verify touchpad data
+                static bool vendorDumped = false;
+                if (!vendorDumped)
+                {
+                    vendorDumped = true;
+                    LOG_DEBUG(SVC_CONV, 522, "BT raw[0-15]=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X "
+                        "raw[32-47]=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
+                        rawInput[0], rawInput[1], rawInput[2], rawInput[3],
+                        rawInput[4], rawInput[5], rawInput[6], rawInput[7],
+                        rawInput[8], rawInput[9], rawInput[10], rawInput[11],
+                        rawInput[12], rawInput[13], rawInput[14], rawInput[15],
+                        rawInput[32], rawInput[33], rawInput[34], rawInput[35],
+                        rawInput[36], rawInput[37], rawInput[38], rawInput[39],
+                        rawInput[40], rawInput[41], rawInput[42], rawInput[43],
+                        rawInput[44], rawInput[45], rawInput[46], rawInput[47]);
+                }
             }
             else
             {
@@ -382,8 +424,9 @@ void DualSenseBridge::Run()
                     static int heartbeat = 0;
                     if (++heartbeat % 600 == 0)
                     {
-                        LOG_DEBUG(SVC_CONV, 521, "Heartbeat: l2=%d r2=%d dpt=%02X seq=%d",
-                            usbInput[5], usbInput[6], usbInput[8], m_sequenceCounter);
+                        int outCount = GetOutputReportCount();
+                        LOG_DEBUG(SVC_CONV, 521, "Heartbeat: l2=%d r2=%d dpt=%02X seq=%d outQ=%d",
+                            usbInput[5], usbInput[6], usbInput[8], m_sequenceCounter, outCount);
                     }
                 }
             }
@@ -396,22 +439,46 @@ void DualSenseBridge::Run()
             DWORD outputSize = sizeof(usbOutput);
             if (ReadOutputReport(usbOutput, &outputSize) && outputSize > 0)
             {
-                LOG_DEBUG(SVC_IOCTL, 403, "Output report received from VHF, size=%d", outputSize);
+                LOG_INFO(SVC_IOCTL, 403, "Output report received from VHF, size=%d reportId=0x%02X",
+                    outputSize, usbOutput[0]);
 
-                // 5. Convert USB to BT and write to real controller
+                // 5. Convert USB output to BT format and forward to physical controller.
+                // Open a fresh non-overlapped handle for WriteFile (interrupt out channel).
                 ZeroMemory(btOutput, sizeof(btOutput));
                 btOutputSize = sizeof(btOutput);
 
                 if (UsbToBtOutputReport(usbOutput, outputSize, btOutput, sizeof(btOutput), &btOutputSize))
                 {
-                    if (!ForwardOutputToBT(btOutput, btOutputSize))
+                    HANDLE hOut = CreateFile(
+                        m_btDevice.DevicePath,
+                        GENERIC_WRITE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        NULL,
+                        OPEN_EXISTING,
+                        0, // synchronous - needed for WriteFile
+                        NULL
+                    );
+
+                    if (hOut != INVALID_HANDLE_VALUE)
                     {
-                        LOG_ERROR(SVC_BT, 203, "Failed to write output to BT controller, error=%d",
-                            GetLastError());
+                        DWORD bytesWritten = 0;
+                        if (WriteFile(hOut, btOutput, btOutputSize, &bytesWritten, NULL) &&
+                            bytesWritten == btOutputSize)
+                        {
+                            LOG_INFO(SVC_BT, 204, "Output WriteFile OK, BT size=%d seq=%d",
+                                btOutputSize, (btOutput[1] >> 4) & 0x0F);
+                        }
+                        else
+                        {
+                            DWORD err = GetLastError();
+                            LOG_ERROR(SVC_BT, 203, "WriteFile failed, error=%d btSize=%d", err, btOutputSize);
+                        }
+                        CloseHandle(hOut);
                     }
                     else
                     {
-                        LOG_DEBUG(SVC_BT, 204, "Output forwarded to BT DualSense, size=%d", btOutputSize);
+                        LOG_ERROR(SVC_BT, 207, "Open BT handle for output failed, error=%d",
+                            GetLastError());
                     }
                 }
                 else
@@ -421,8 +488,15 @@ void DualSenseBridge::Run()
             }
         }
 
-        // Small yield to avoid saturating CPU
-        Sleep(1);
+        // When BT is disconnected, use a longer delay to reduce enumeration frequency
+        if (m_btDevice.Handle == INVALID_HANDLE_VALUE)
+        {
+            Sleep(2000);
+        }
+        else
+        {
+            Sleep(1);
+        }
     }
 
     // Cleanup
@@ -430,6 +504,10 @@ void DualSenseBridge::Run()
     if (m_btDevice.Handle != INVALID_HANDLE_VALUE)
     {
         HIDApi::Close(m_btDevice.Handle);
+    }
+    if (m_usbDevice.Handle != INVALID_HANDLE_VALUE)
+    {
+        HIDApi::Close(m_usbDevice.Handle);
     }
 
     LOG_INFO(SVC_MAIN, 3, "Bridge main loop ended");

@@ -36,11 +36,11 @@ private:
     bool FindBtController();
     bool SubmitInputReport(const BYTE* report, DWORD size);
     bool ReadOutputReport(BYTE* report, DWORD* size);
-    bool ForwardOutputToBT(const BYTE* report, DWORD size);
     int  GetOutputReportCount();
 
     HANDLE m_sidebandHandle;
-    DualSenseDevice m_btDevice;
+    DualSenseDevice m_btDevice;        // 78-byte native BT (input source)
+    DualSenseDevice m_usbDevice;       // 64-byte USB proxy (output target)
     HANDLE m_stopEvent;
     bool m_active;
     bool m_btConnected;

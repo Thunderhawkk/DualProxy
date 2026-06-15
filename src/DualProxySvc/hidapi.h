@@ -21,8 +21,10 @@ struct DualSenseDevice {
 
 class HIDApi {
 public:
-    // Enumerate and find the first connected DualSense (BT preferred)
-    static bool FindDualSense(DualSenseDevice& device);
+    // Enumerate and find connected DualSense devices.
+    // inputDevice = 78-byte native BT (preferred input source)
+    // outputDevice = 64-byte USB proxy (for sending output reports)
+    static bool FindDualSense(DualSenseDevice& inputDevice, DualSenseDevice& outputDevice);
 
     // Read input report (blocking with timeout)
     static bool ReadInput(HANDLE handle, BYTE* buffer, DWORD size, DWORD timeoutMs = 100);

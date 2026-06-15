@@ -70,6 +70,17 @@ VhfActivate(
     vhfConfig.ProductID = 0x0CE6;
     vhfConfig.VersionNumber = 0x8100;
 
+    // Set hardware IDs in HID format so Windows class driver recognizes
+    // this as a DualSense Wireless Controller (matching input.inf mapping
+    // for VID 0x054C/PID 0x0CE6/REV 0x8100).
+    {
+        static const WCHAR hidHardwareIds[] =
+            L"HID\\VID_054C&PID_0CE6&REV_8100\0"
+            L"HID\\VID_054C&PID_0CE6\0";
+        vhfConfig.HardwareIDs = (PWSTR)hidHardwareIds;
+        vhfConfig.HardwareIDsLength = sizeof(hidHardwareIds);
+    }
+
     {
         HANDLE keyHandle;
         UNICODE_STRING keyName;
@@ -263,6 +274,10 @@ VirtualDualSenseEvtVhfAsyncWriteReport(
     {
         copySize = DUALSENSE_OUTPUT_REPORT_SIZE;
     }
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "VirtualDualSense: WriteReport reportId=0x%02X size=%lu\n",
+        TransferPacket->reportId, copySize);
 
     POUTPUT_REPORT_ENTRY entry = (POUTPUT_REPORT_ENTRY)ExAllocatePool2(
         POOL_FLAG_NON_PAGED,

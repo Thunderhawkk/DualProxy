@@ -4,16 +4,14 @@
 #include <hidsdi.h>
 #include <hidpi.h>
 
-// DEFINE_GUID from devguid.h / hidsdi.h for the HID interface class
-// {4d1e55b2-f16f-11cf-88cb-001111000030}
 static const GUID GUID_DEVINTERFACE_HID = {0x4d1e55b2, 0xf16f, 0x11cf, {0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
 
 #define DUALSENSE_VID 0x054C
 #define DUALSENSE_PID_USB  0x0CE6
-#define DUALSENSE_PID_BT   0x0CE6  // BT uses same PID on Windows
+#define DUALSENSE_PID_BT   0x0CE6
 #define DUALSENSE_INPUT_REPORT_SIZE 64
 
-bool HIDApi::FindDualSense(DualSenseDevice& device)
+bool HIDApi::FindDualSense(DualSenseDevice& inputDevice, DualSenseDevice& outputDevice)
 {
     HDEVINFO deviceInfoSet = SetupDiGetClassDevs(
         &GUID_DEVINTERFACE_HID,
@@ -23,12 +21,8 @@ bool HIDApi::FindDualSense(DualSenseDevice& device)
     if (deviceInfoSet == INVALID_HANDLE_VALUE)
         return false;
 
-    // Prefer 78-byte native BT interface (actual gamepad input source).
-    // Fall back to 64-byte USB proxy interface (output-only compatibility shim).
-    DualSenseDevice preferred = {};
-    preferred.Handle = INVALID_HANDLE_VALUE;
-    DualSenseDevice fallback = {};
-    fallback.Handle = INVALID_HANDLE_VALUE;
+    inputDevice.Handle = INVALID_HANDLE_VALUE;
+    outputDevice.Handle = INVALID_HANDLE_VALUE;
 
     SP_DEVICE_INTERFACE_DATA interfaceData;
     interfaceData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
@@ -76,6 +70,20 @@ bool HIDApi::FindDualSense(DualSenseDevice& device)
         if (HidD_GetAttributes(hDevice, &attrs) &&
             attrs.VendorID == DUALSENSE_VID && attrs.ProductID == DUALSENSE_PID_BT)
         {
+            // Skip VHF virtual devices that share VID/PID with the real DualSense.
+            // VHF devices return "Virtual HID Framework (VHF) HID device" from
+            // HidD_GetProductString. Real BT DualSense uses the PNP UUID
+            // {00001124-...} in its device path (no BTHENUM marker).
+            {
+                WCHAR productStr[128] = { 0 };
+                if (HidD_GetProductString(hDevice, productStr, sizeof(productStr)) &&
+                    wcsstr(productStr, L"VHF") != NULL)
+                {
+                    CloseHandle(hDevice);
+                    free(detailData);
+                    continue;
+                }
+            }
             PHIDP_PREPARSED_DATA ppd = NULL;
             if (HidD_GetPreparsedData(hDevice, &ppd))
             {
@@ -86,32 +94,28 @@ bool HIDApi::FindDualSense(DualSenseDevice& device)
                 {
                     DWORD reportSize = caps.InputReportByteLength;
 
-                    bool isBt = (wcsstr(detailData->DevicePath, L"BTH") != NULL) ||
-                                (wcsstr(detailData->DevicePath, L"Bluetooth") != NULL) ||
-                                (wcsstr(detailData->DevicePath, L"00001124") != NULL);
-
-                    if (reportSize > DUALSENSE_INPUT_REPORT_SIZE && preferred.Handle == INVALID_HANDLE_VALUE)
+                    if (reportSize > DUALSENSE_INPUT_REPORT_SIZE &&
+                        inputDevice.Handle == INVALID_HANDLE_VALUE)
                     {
-                        // 78-byte native BT interface — preferred input source
-                        preferred.Handle = hDevice;
-                        preferred.Vid = attrs.VendorID;
-                        preferred.Pid = attrs.ProductID;
-                        wcsncpy_s(preferred.DevicePath, detailData->DevicePath, _TRUNCATE);
-                        GetSerialString(hDevice, preferred.Serial, 64);
-                        preferred.IsBluetooth = isBt;
-                        preferred.InputReportByteLength = reportSize;
+                        inputDevice.Handle = hDevice;
+                        inputDevice.Vid = attrs.VendorID;
+                        inputDevice.Pid = attrs.ProductID;
+                        wcsncpy_s(inputDevice.DevicePath, detailData->DevicePath, _TRUNCATE);
+                        GetSerialString(hDevice, inputDevice.Serial, 64);
+                        inputDevice.IsBluetooth = true;
+                        inputDevice.InputReportByteLength = reportSize;
                         keepHandle = true;
                     }
-                    else if (reportSize == DUALSENSE_INPUT_REPORT_SIZE && fallback.Handle == INVALID_HANDLE_VALUE)
+                    else if (reportSize == DUALSENSE_INPUT_REPORT_SIZE &&
+                             outputDevice.Handle == INVALID_HANDLE_VALUE)
                     {
-                        // 64-byte USB proxy interface — save as fallback
-                        fallback.Handle = hDevice;
-                        fallback.Vid = attrs.VendorID;
-                        fallback.Pid = attrs.ProductID;
-                        wcsncpy_s(fallback.DevicePath, detailData->DevicePath, _TRUNCATE);
-                        GetSerialString(hDevice, fallback.Serial, 64);
-                        fallback.IsBluetooth = isBt;
-                        fallback.InputReportByteLength = reportSize;
+                        outputDevice.Handle = hDevice;
+                        outputDevice.Vid = attrs.VendorID;
+                        outputDevice.Pid = attrs.ProductID;
+                        wcsncpy_s(outputDevice.DevicePath, detailData->DevicePath, _TRUNCATE);
+                        GetSerialString(hDevice, outputDevice.Serial, 64);
+                        outputDevice.IsBluetooth = false;
+                        outputDevice.InputReportByteLength = reportSize;
                         keepHandle = true;
                     }
                 }
@@ -126,22 +130,18 @@ bool HIDApi::FindDualSense(DualSenseDevice& device)
 
     SetupDiDestroyDeviceInfoList(deviceInfoSet);
 
-    if (preferred.Handle != INVALID_HANDLE_VALUE)
+    if (inputDevice.Handle == INVALID_HANDLE_VALUE)
     {
-        device = preferred;
-        if (fallback.Handle != INVALID_HANDLE_VALUE)
-            CloseHandle(fallback.Handle);
-        return true;
+        if (outputDevice.Handle != INVALID_HANDLE_VALUE)
+        {
+            inputDevice = outputDevice;
+            outputDevice.Handle = INVALID_HANDLE_VALUE;
+            return true;
+        }
+        return false;
     }
 
-    if (fallback.Handle != INVALID_HANDLE_VALUE)
-    {
-        device = fallback;
-        return true;
-    }
-
-    device.Handle = INVALID_HANDLE_VALUE;
-    return false;
+    return true;
 }
 
 bool HIDApi::ReadInput(HANDLE handle, BYTE* buffer, DWORD size, DWORD timeoutMs)
@@ -153,7 +153,6 @@ bool HIDApi::ReadInput(HANDLE handle, BYTE* buffer, DWORD size, DWORD timeoutMs)
 
     UNREFERENCED_PARAMETER(timeoutMs);
 
-    // Try synchronous ReadFile first, fall back to HidD_GetInputReport
     OVERLAPPED ov = { 0 };
     ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!ov.hEvent)
@@ -208,24 +207,13 @@ bool HIDApi::ReadInputFromPath(const wchar_t* devicePath, BYTE* buffer, DWORD si
         return false;
     }
 
-    UNREFERENCED_PARAMETER(timeoutMs);
-
-    // Log the device path (first call only for brevity)
-    static bool pathLogged = false;
-    if (!pathLogged)
-    {
-        char pathA[512];
-        WideCharToMultiByte(CP_ACP, 0, devicePath, -1, pathA, sizeof(pathA), NULL, NULL);
-        pathLogged = true;
-    }
-
     HANDLE hDevice = CreateFile(
         devicePath,
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL,
         OPEN_EXISTING,
-        0,
+        FILE_FLAG_OVERLAPPED,
         NULL
     );
 
@@ -234,36 +222,60 @@ bool HIDApi::ReadInputFromPath(const wchar_t* devicePath, BYTE* buffer, DWORD si
         return false;
     }
 
-    // Diagnostic: query caps
-    static bool capsLogged = false;
-    if (!capsLogged)
-    {
-        PHIDP_PREPARSED_DATA ppd = NULL;
-        if (HidD_GetPreparsedData(hDevice, &ppd))
-        {
-            HIDP_CAPS caps;
-            if (HidP_GetCaps(ppd, &caps) == HIDP_STATUS_SUCCESS)
-            {
-                capsLogged = true;
-            }
-            HidD_FreePreparsedData(ppd);
-        }
-    }
-
-    // Try synchronous ReadFile, then fallback to HidD_GetInputReport
     DWORD bytesRead = 0;
     bool success = false;
     DWORD lastErr = 0;
 
-    if (ReadFile(hDevice, buffer, size, &bytesRead, NULL))
+    OVERLAPPED ov = { 0 };
+    ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!ov.hEvent)
     {
-        success = (bytesRead > 0);
+        // Fallback: synchronous read (may block)
+        if (!ReadFile(hDevice, buffer, size, &bytesRead, NULL))
+        {
+            lastErr = GetLastError();
+        }
+        else
+        {
+            success = (bytesRead > 0);
+        }
     }
     else
     {
-        lastErr = GetLastError();
+        if (ReadFile(hDevice, buffer, size, NULL, &ov))
+        {
+            success = true;
+            bytesRead = size;
+        }
+        else
+        {
+            DWORD err = GetLastError();
+            if (err == ERROR_IO_PENDING)
+            {
+                DWORD waitResult = WaitForSingleObject(ov.hEvent, timeoutMs);
+                if (waitResult == WAIT_OBJECT_0)
+                {
+                    success = GetOverlappedResult(hDevice, &ov, &bytesRead, FALSE);
+                    if (!success) lastErr = GetLastError();
+                }
+                else
+                {
+                    CancelIo(hDevice);
+                    GetOverlappedResult(hDevice, &ov, &bytesRead, FALSE);
+                    lastErr = (waitResult == WAIT_TIMEOUT) ? ERROR_TIMEOUT : WAIT_ABANDONED;
+                }
+            }
+            else
+            {
+                lastErr = err;
+            }
+        }
+        CloseHandle(ov.hEvent);
+    }
 
-        // Fallback: try HidD_GetInputReport
+    if (!success)
+    {
+        // Fallback: HidD_GetInputReport
         buffer[0] = 0x01;
         success = HidD_GetInputReport(hDevice, buffer, size);
         if (!success)
@@ -293,9 +305,6 @@ bool HIDApi::WriteOutput(HANDLE handle, const BYTE* buffer, DWORD size)
         return false;
     }
 
-    // Try synchronous WriteFile first (interrupt out pipe), then fall back to
-    // HidD_SetOutputReport (control pipe). BT DualSense often requires the
-    // control pipe for output reports.
     DWORD bytesWritten = 0;
     if (WriteFile(handle, buffer, size, &bytesWritten, NULL) && bytesWritten == size)
     {

@@ -73,17 +73,21 @@ BOOL UsbToBtOutputReport(const BYTE* usbReport, DWORD usbSize, BYTE* btReport, D
 
     static BYTE s_outputSeq = 0;
 
-    // BT output format: [report_id=0x31][seq_tag][tag=0x10][common data 71 bytes][crc32 4 bytes]
+    // BT output format:
+    //   [0]=report_id(0x31) [1]=seq_tag [2]=tag(0x10) [3-4]=reserved
+    //   [5-73]=common data (69 bytes, USB output from byte 1)
+    //   [74-77]=CRC32
     memset(btReport, 0, btSize);
     btReport[0] = DS_OUTPUT_REPORT_BT;
     btReport[1] = (s_outputSeq << 4) | 0x00;
     btReport[2] = DS_OUTPUT_TAG;
+    // btReport[3-4] left as zero (reserved)
     s_outputSeq = (s_outputSeq + 1) & 0x0F;
 
-    // Common data (same as USB report from byte 1)
+    // Common data (USB output from byte 1) at offset 5
     DWORD commonSize = usbSize - 1;
-    if (commonSize > 71) commonSize = 71;
-    memcpy(btReport + 3, usbReport + 1, commonSize);
+    if (commonSize > 69) commonSize = 69;
+    memcpy(btReport + 5, usbReport + 1, commonSize);
 
     // CRC32 over seed byte + entire report except last 4 bytes
     uint8_t seed = DS_CRC32_SEED;
