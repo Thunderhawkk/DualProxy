@@ -198,6 +198,29 @@ DWORD WINAPI BridgeThread(LPVOID lpParam)
     return 0;
 }
 
+static SECURITY_ATTRIBUTES g_pipeSa;
+static bool g_pipeSaInitialized = false;
+
+static SECURITY_ATTRIBUTES* GetPipeSecurityAttributes()
+{
+    if (!g_pipeSaInitialized)
+    {
+        // Create a DACL granting Everyone GENERIC_READ | GENERIC_WRITE.
+        // Without this, pipes created by LocalSystem may reject non-admin clients.
+        PSECURITY_DESCRIPTOR sd = (PSECURITY_DESCRIPTOR)LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
+        if (sd)
+        {
+            InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION);
+            SetSecurityDescriptorDacl(sd, TRUE, NULL, FALSE);
+            g_pipeSa.nLength = sizeof(SECURITY_ATTRIBUTES);
+            g_pipeSa.lpSecurityDescriptor = sd;
+            g_pipeSa.bInheritHandle = FALSE;
+        }
+        g_pipeSaInitialized = true;
+    }
+    return &g_pipeSa;
+}
+
 DWORD WINAPI PipeServerThread(LPVOID lpParam)
 {
     UNREFERENCED_PARAMETER(lpParam);
@@ -222,7 +245,7 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam)
             512,
             512,
             0,
-            NULL
+            GetPipeSecurityAttributes()
         );
 
         if (pipe == INVALID_HANDLE_VALUE)
@@ -289,7 +312,9 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam)
 
         if (wcscmp(command, L"ENABLE") == 0)
         {
-            if (g_bridge.Activate())
+            bool emuOk = g_bridge.Activate();
+            g_bridge.EnableHidHide();
+            if (emuOk)
             {
                 wcscpy_s(response, L"OK");
                 LOG_INFO(SVC_IPC, 505, "ENABLE command processed successfully");
@@ -302,7 +327,9 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam)
         }
         else if (wcscmp(command, L"DISABLE") == 0)
         {
-            if (g_bridge.Deactivate())
+            bool emuOk = g_bridge.Deactivate();
+            g_bridge.DisableHidHide();
+            if (emuOk)
             {
                 wcscpy_s(response, L"OK");
                 LOG_INFO(SVC_IPC, 507, "DISABLE command processed successfully");
@@ -315,13 +342,42 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam)
         }
         else if (wcscmp(command, L"STATUS") == 0)
         {
+            wchar_t emuState[32];
             if (g_bridge.IsBtConnected())
             {
-                wcscpy_s(response, g_bridge.IsActive() ? L"active" : L"inactive");
+                wcscpy_s(emuState, g_bridge.IsActive() ? L"active" : L"inactive");
             }
             else
             {
-                wcscpy_s(response, L"disconnected");
+                wcscpy_s(emuState, L"disconnected");
+            }
+            swprintf_s(response, L"%s|%s", emuState,
+                g_bridge.IsHidHideActive() ? L"hiding_on" : L"hiding_off");
+        }
+        else if (wcscmp(command, L"HIDHIDE_ON") == 0)
+        {
+            if (g_bridge.EnableHidHide())
+            {
+                wcscpy_s(response, L"OK");
+                LOG_INFO(SVC_IPC, 510, "HIDHIDE_ON processed");
+            }
+            else
+            {
+                wcscpy_s(response, L"FAIL");
+                LOG_WARN(SVC_IPC, 511, "HIDHIDE_ON failed");
+            }
+        }
+        else if (wcscmp(command, L"HIDHIDE_OFF") == 0)
+        {
+            if (g_bridge.DisableHidHide())
+            {
+                wcscpy_s(response, L"OK");
+                LOG_INFO(SVC_IPC, 512, "HIDHIDE_OFF processed");
+            }
+            else
+            {
+                wcscpy_s(response, L"FAIL");
+                LOG_WARN(SVC_IPC, 513, "HIDHIDE_OFF failed");
             }
         }
         else

@@ -74,4 +74,9 @@
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyScripts" AfterTargets="Build">
+    <Copy SourceFiles="$(ProjectDir)..\..\scripts\install.ps1" DestinationFolder="$(OutDir)scripts" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)..\..\scripts\uninstall.ps1" DestinationFolder="$(OutDir)scripts" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)..\..\scripts\build.ps1" DestinationFolder="$(OutDir)scripts" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

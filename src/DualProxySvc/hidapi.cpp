@@ -41,11 +41,17 @@ bool HIDApi::FindDualSense(DualSenseDevice& inputDevice, DualSenseDevice& output
         if (!detailData) continue;
         detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
 
-        if (!SetupDiGetDeviceInterfaceDetail(deviceInfoSet, &interfaceData, detailData, requiredSize, NULL, NULL))
+        SP_DEVINFO_DATA devInfoData;
+        devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+        if (!SetupDiGetDeviceInterfaceDetail(deviceInfoSet, &interfaceData, detailData, requiredSize, NULL, &devInfoData))
         {
             free(detailData);
             continue;
         }
+
+        WCHAR devInstanceId[256] = {0};
+        SetupDiGetDeviceInstanceId(deviceInfoSet, &devInfoData, devInstanceId, 256, NULL);
 
         HANDLE hDevice = CreateFile(
             detailData->DevicePath,
@@ -101,6 +107,7 @@ bool HIDApi::FindDualSense(DualSenseDevice& inputDevice, DualSenseDevice& output
                         inputDevice.Vid = attrs.VendorID;
                         inputDevice.Pid = attrs.ProductID;
                         wcsncpy_s(inputDevice.DevicePath, detailData->DevicePath, _TRUNCATE);
+                        wcsncpy_s(inputDevice.DeviceInstanceId, devInstanceId, _TRUNCATE);
                         GetSerialString(hDevice, inputDevice.Serial, 64);
                         inputDevice.IsBluetooth = true;
                         inputDevice.InputReportByteLength = reportSize;
@@ -113,6 +120,7 @@ bool HIDApi::FindDualSense(DualSenseDevice& inputDevice, DualSenseDevice& output
                         outputDevice.Vid = attrs.VendorID;
                         outputDevice.Pid = attrs.ProductID;
                         wcsncpy_s(outputDevice.DevicePath, detailData->DevicePath, _TRUNCATE);
+                        wcsncpy_s(outputDevice.DeviceInstanceId, devInstanceId, _TRUNCATE);
                         GetSerialString(hDevice, outputDevice.Serial, 64);
                         outputDevice.IsBluetooth = false;
                         outputDevice.InputReportByteLength = reportSize;

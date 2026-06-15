@@ -29,11 +29,16 @@ public:
     bool IsActive() const { return m_active; }
     DWORD GetLastActivateError() const { return m_lastActivateError; }
     bool IsBtConnected() const { return m_btConnected; }
+    bool EnableHidHide();
+    bool DisableHidHide();
+    bool IsHidHideActive() const { return m_hidHideActive; }
 
 private:
     bool OpenSideband();
     void CloseSideband();
     bool FindBtController();
+    bool ConfigureHidHide(const wchar_t* btDeviceInstanceId);
+    static bool RunHidHideProcess(const wchar_t* cmdLine);
     bool SubmitInputReport(const BYTE* report, DWORD size);
     bool ReadOutputReport(BYTE* report, DWORD* size);
     int  GetOutputReportCount();
@@ -44,6 +49,9 @@ private:
     HANDLE m_stopEvent;
     bool m_active;
     bool m_btConnected;
+    bool m_hidHideConfigured;
+    bool m_hidHideActive;
     int  m_sequenceCounter;
+    wchar_t m_btDeviceInstanceId[256];
     DWORD m_lastActivateError;
 };

@@ -12,6 +12,7 @@
 struct DualSenseDevice {
     HANDLE Handle;
     wchar_t DevicePath[256];
+    wchar_t DeviceInstanceId[256];
     wchar_t Serial[64];
     USHORT Vid;
     USHORT Pid;

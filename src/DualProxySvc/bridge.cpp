@@ -1,6 +1,7 @@
 #include "bridge.h"
 #include "logging.h"
 #include <memory.h>
+#include <wchar.h>
 
 #define SVC_MAIN "SVC_MAIN"
 #define SVC_BT   "SVC_BT"
@@ -12,6 +13,8 @@ DualSenseBridge::DualSenseBridge()
     : m_sidebandHandle(INVALID_HANDLE_VALUE)
     , m_active(false)
     , m_btConnected(false)
+    , m_hidHideConfigured(false)
+    , m_hidHideActive(false)
     , m_sequenceCounter(0)
     , m_lastActivateError(0)
 {
@@ -21,7 +24,10 @@ DualSenseBridge::DualSenseBridge()
     m_btDevice.IsBluetooth = false;
     m_btDevice.InputReportByteLength = 0;
     m_btDevice.DevicePath[0] = L'\0';
+    m_btDevice.DeviceInstanceId[0] = L'\0';
     m_btDevice.Serial[0] = L'\0';
+
+    m_btDeviceInstanceId[0] = L'\0';
 
     m_usbDevice.Handle = INVALID_HANDLE_VALUE;
     m_usbDevice.Vid = 0;
@@ -29,6 +35,7 @@ DualSenseBridge::DualSenseBridge()
     m_usbDevice.IsBluetooth = false;
     m_usbDevice.InputReportByteLength = 0;
     m_usbDevice.DevicePath[0] = L'\0';
+    m_usbDevice.DeviceInstanceId[0] = L'\0';
     m_usbDevice.Serial[0] = L'\0';
 
     m_stopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -120,11 +127,18 @@ bool DualSenseBridge::FindBtController()
         {
             m_btDevice = inputDev;
             m_btConnected = true;
+            wcsncpy_s(m_btDeviceInstanceId, inputDev.DeviceInstanceId, _TRUNCATE);
 
             LOG_INFO(SVC_BT, 200, "BT DualSense found: IN=%uB native BT, OUT=%uB USB proxy Serial=%S",
                 inputDev.InputReportByteLength,
                 outputDev.Handle != INVALID_HANDLE_VALUE ? outputDev.InputReportByteLength : 0,
                 inputDev.Serial);
+
+            if (!m_hidHideConfigured)
+            {
+                ConfigureHidHide(m_btDevice.DeviceInstanceId);
+            }
+
             return true;
         }
 
@@ -138,6 +152,190 @@ bool DualSenseBridge::FindBtController()
     m_btConnected = false;
     LOG_WARN(SVC_BT, 201, "No BT DualSense found");
     return false;
+}
+
+bool DualSenseBridge::RunHidHideProcess(const wchar_t* cmdLine)
+{
+    PROCESS_INFORMATION pi = {0};
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(STARTUPINFOW);
+
+    if (!CreateProcessW(NULL, const_cast<wchar_t*>(cmdLine), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, 10000);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    return (exitCode == 0);
+}
+
+bool DualSenseBridge::ConfigureHidHide(const wchar_t* btDeviceInstanceId)
+{
+    if (!btDeviceInstanceId || btDeviceInstanceId[0] == L'\0')
+    {
+        LOG_WARN("HIDHIDE", 600, "No BT device instance ID, skipping HidHide config");
+        return false;
+    }
+
+    const wchar_t* hidHidePath = L"C:\\Program Files\\Nefarius Software Solutions\\HidHide\\x64\\HidHideCLI.exe";
+    DWORD attrs = GetFileAttributesW(hidHidePath);
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        LOG_WARN("HIDHIDE", 601, "HidHideCLI not found, skipping");
+        return false;
+    }
+
+    WCHAR svcPath[MAX_PATH] = {0};
+    if (!GetModuleFileNameW(NULL, svcPath, MAX_PATH))
+    {
+        LOG_ERROR("HIDHIDE", 602, "GetModuleFileNameW failed, error=%lu", GetLastError());
+        return false;
+    }
+
+    LOG_INFO("HIDHIDE", 603, "Configuring HidHide: hiding device instance \"%ls\", whitelisting \"%ls\"",
+        btDeviceInstanceId, svcPath);
+
+    bool allOk = true;
+    WCHAR cmdLine[1024];
+
+    swprintf_s(cmdLine, L"\"%s\" app-reg \"%s\"", hidHidePath, svcPath);
+    if (!RunHidHideProcess(cmdLine))
+    {
+        LOG_WARN("HIDHIDE", 610, "app-reg failed");
+        allOk = false;
+    }
+
+    swprintf_s(cmdLine, L"\"%s\" dev-hide \"%s\"", hidHidePath, btDeviceInstanceId);
+    if (!RunHidHideProcess(cmdLine))
+    {
+        LOG_WARN("HIDHIDE", 611, "dev-hide failed");
+        allOk = false;
+    }
+
+    swprintf_s(cmdLine, L"\"%s\" cloak-on", hidHidePath);
+    if (!RunHidHideProcess(cmdLine))
+    {
+        LOG_WARN("HIDHIDE", 612, "cloak-on failed");
+        allOk = false;
+    }
+
+    if (allOk)
+    {
+        LOG_INFO("HIDHIDE", 620, "HidHide configured: whitelisted, hidden, cloaking on");
+        m_hidHideConfigured = true;
+        m_hidHideActive = true;
+    }
+    else
+    {
+        LOG_WARN("HIDHIDE", 621, "HidHide configuration had some errors, continuing");
+    }
+
+    return allOk;
+}
+
+bool DualSenseBridge::EnableHidHide()
+{
+    if (m_hidHideActive)
+    {
+        return true;
+    }
+
+    if (m_btDeviceInstanceId[0] == L'\0')
+    {
+        LOG_WARN("HIDHIDE", 630, "No stored BT device instance ID, cannot enable hiding");
+        return false;
+    }
+
+    const wchar_t* hidHidePath = L"C:\\Program Files\\Nefarius Software Solutions\\HidHide\\x64\\HidHideCLI.exe";
+    if (GetFileAttributesW(hidHidePath) == INVALID_FILE_ATTRIBUTES)
+    {
+        LOG_WARN("HIDHIDE", 631, "HidHideCLI not found, cannot enable hiding");
+        return false;
+    }
+
+    WCHAR cmdLine[1024];
+    bool allOk = true;
+
+    swprintf_s(cmdLine, L"\"%s\" dev-hide \"%s\"", hidHidePath, m_btDeviceInstanceId);
+    if (!RunHidHideProcess(cmdLine))
+    {
+        LOG_WARN("HIDHIDE", 632, "Enable: dev-hide failed");
+        allOk = false;
+    }
+
+    swprintf_s(cmdLine, L"\"%s\" cloak-on", hidHidePath);
+    if (!RunHidHideProcess(cmdLine))
+    {
+        LOG_WARN("HIDHIDE", 633, "Enable: cloak-on failed");
+        allOk = false;
+    }
+
+    if (allOk)
+    {
+        m_hidHideActive = true;
+        LOG_INFO("HIDHIDE", 634, "HidHide re-enabled");
+    }
+    else
+    {
+        LOG_WARN("HIDHIDE", 635, "EnableHidHide had errors");
+    }
+
+    return allOk;
+}
+
+bool DualSenseBridge::DisableHidHide()
+{
+    if (!m_hidHideActive)
+    {
+        return true;
+    }
+
+    if (m_btDeviceInstanceId[0] == L'\0')
+    {
+        LOG_WARN("HIDHIDE", 640, "No stored BT device instance ID, cannot disable hiding");
+        return false;
+    }
+
+    const wchar_t* hidHidePath = L"C:\\Program Files\\Nefarius Software Solutions\\HidHide\\x64\\HidHideCLI.exe";
+    if (GetFileAttributesW(hidHidePath) == INVALID_FILE_ATTRIBUTES)
+    {
+        LOG_WARN("HIDHIDE", 641, "HidHideCLI not found, cannot disable hiding");
+        return false;
+    }
+
+    WCHAR cmdLine[1024];
+    bool allOk = true;
+
+    swprintf_s(cmdLine, L"\"%s\" cloak-off", hidHidePath);
+    if (!RunHidHideProcess(cmdLine))
+    {
+        LOG_WARN("HIDHIDE", 642, "Disable: cloak-off failed");
+        allOk = false;
+    }
+
+    swprintf_s(cmdLine, L"\"%s\" dev-unhide \"%s\"", hidHidePath, m_btDeviceInstanceId);
+    if (!RunHidHideProcess(cmdLine))
+    {
+        LOG_WARN("HIDHIDE", 643, "Disable: dev-unhide failed");
+        allOk = false;
+    }
+
+    if (allOk)
+    {
+        m_hidHideActive = false;
+        LOG_INFO("HIDHIDE", 644, "HidHide disabled");
+    }
+    else
+    {
+        LOG_WARN("HIDHIDE", 645, "DisableHidHide had errors");
+    }
+
+    return allOk;
 }
 
 bool DualSenseBridge::Ping()

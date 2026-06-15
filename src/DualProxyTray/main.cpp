@@ -13,6 +13,11 @@
 #define ID_TRAY_ENABLE    1002
 #define ID_TRAY_DISABLE   1003
 #define ID_TRAY_SETTINGS  1004
+#define ID_TRAY_HIDHIDE_ON   1005
+#define ID_TRAY_HIDHIDE_OFF  1006
+#define ID_TRAY_INSTALL_DRIVER   1007
+#define ID_TRAY_UNINSTALL_DRIVER 1008
+#define ID_TRAY_BUILD_DRIVERS    1009
 #define HOTKEY_ID         1
 
 #define TRAY_GREEN  0
@@ -26,6 +31,7 @@ HWND g_hwnd;
 NOTIFYICONDATAW g_nid;
 int g_state = TRAY_RED;
 bool g_enabled = false;
+bool g_hidHideOn = false;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 void CreateTrayIcon(HWND hwnd);
@@ -33,6 +39,8 @@ void UpdateTrayIcon(int state);
 void ShowContextMenu(HWND hwnd);
 bool SendServiceCommand(const wchar_t* command, wchar_t* response, DWORD responseSize);
 void ToggleEmulation();
+void ToggleHidHide();
+void RefreshStates();
 void LoadSettings();
 void SaveSettings();
 
@@ -82,6 +90,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Load settings
     LoadSettings();
+    RefreshStates();
 
     // Message loop
     MSG msg;
@@ -136,8 +145,57 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_TRAY_DISABLE:
             ToggleEmulation();
             break;
+        case ID_TRAY_HIDHIDE_ON:
+        case ID_TRAY_HIDHIDE_OFF:
+            ToggleHidHide();
+            break;
+        case ID_TRAY_INSTALL_DRIVER:
+        {
+            WCHAR exeDir[MAX_PATH], scriptDir[MAX_PATH];
+            GetModuleFileNameW(NULL, exeDir, MAX_PATH);
+            PathRemoveFileSpecW(exeDir);
+            wcscpy_s(scriptDir, exeDir);
+            PathAppendW(scriptDir, L"scripts");
+            if (GetFileAttributesW(scriptDir) == INVALID_FILE_ATTRIBUTES)
+            {
+                wcscpy_s(scriptDir, exeDir);
+                PathAppendW(scriptDir, L"..\\..\\..\\scripts");
+            }
+            WCHAR params[512];
+            swprintf_s(params, L"-ExecutionPolicy Bypass -NoExit -File \"install.ps1\"");
+            ShellExecuteW(hwnd, L"runas", L"powershell.exe", params, scriptDir, SW_SHOW);
+            break;
+        }
+        case ID_TRAY_UNINSTALL_DRIVER:
+        {
+            WCHAR exeDir[MAX_PATH], scriptDir[MAX_PATH];
+            GetModuleFileNameW(NULL, exeDir, MAX_PATH);
+            PathRemoveFileSpecW(exeDir);
+            wcscpy_s(scriptDir, exeDir);
+            PathAppendW(scriptDir, L"scripts");
+            if (GetFileAttributesW(scriptDir) == INVALID_FILE_ATTRIBUTES)
+            {
+                wcscpy_s(scriptDir, exeDir);
+                PathAppendW(scriptDir, L"..\\..\\..\\scripts");
+            }
+            WCHAR params[512];
+            swprintf_s(params, L"-ExecutionPolicy Bypass -NoExit -File \"uninstall.ps1\"");
+            ShellExecuteW(hwnd, L"runas", L"powershell.exe", params, scriptDir, SW_SHOW);
+            break;
+        }
+        case ID_TRAY_BUILD_DRIVERS:
+        {
+            WCHAR srcDir[MAX_PATH];
+            GetModuleFileNameW(NULL, srcDir, MAX_PATH);
+            PathRemoveFileSpecW(srcDir);
+            PathAppendW(srcDir, L"..\\..\\..\\src");
+            WCHAR cmdLine[1024];
+            swprintf_s(cmdLine,
+                L"/k \"\"C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat\" >nul 2>&1 && MSBuild \"VirtualDualSense.sln\" /p:Configuration=Debug /p:Platform=x64\"");
+            ShellExecuteW(hwnd, NULL, L"cmd.exe", cmdLine, srcDir, SW_SHOW);
+            break;
+        }
         case ID_TRAY_SETTINGS:
-            // Settings dialog placeholder
             MessageBoxW(hwnd, L"Settings dialog not yet implemented.", L"DualProxy", MB_OK);
             break;
         case ID_TRAY_EXIT:
@@ -173,15 +231,17 @@ void CreateTrayIcon(HWND hwnd)
 void UpdateTrayIcon(int state)
 {
     // Use standard icons for now (replace with custom icons later)
+    const wchar_t* hidingSuffix = g_hidHideOn ? L" (Hiding On)" : L"";
+
     switch (state)
     {
     case TRAY_GREEN:
         g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-        wcscpy_s(g_nid.szTip, L"DualProxy - Active");
+        swprintf_s(g_nid.szTip, L"DualProxy - Active%s", hidingSuffix);
         break;
     case TRAY_RED:
         g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-        wcscpy_s(g_nid.szTip, L"DualProxy - Inactive");
+        swprintf_s(g_nid.szTip, L"DualProxy - Inactive%s", hidingSuffix);
         break;
     case TRAY_YELLOW:
         g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
@@ -195,7 +255,24 @@ void UpdateTrayIcon(int state)
 
 void ShowContextMenu(HWND hwnd)
 {
+    // Refresh state from service before showing menu
+    RefreshStates();
+
     HMENU menu = CreatePopupMenu();
+
+    // Status text (disabled/grayed out)
+    {
+        wchar_t statusBuf[128];
+        swprintf_s(statusBuf, L"Emulation: %s", g_enabled ? L"Active" : L"Inactive");
+        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, statusBuf);
+    }
+    {
+        wchar_t statusBuf[128];
+        swprintf_s(statusBuf, L"Hiding: %s", g_hidHideOn ? L"On" : L"Off");
+        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, statusBuf);
+    }
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
 
     if (g_enabled)
     {
@@ -207,7 +284,26 @@ void ShowContextMenu(HWND hwnd)
     }
 
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings");
+
+    if (g_hidHideOn)
+    {
+        AppendMenuW(menu, MF_STRING, ID_TRAY_HIDHIDE_OFF, L"Disable Hiding");
+    }
+    else
+    {
+        AppendMenuW(menu, MF_STRING, ID_TRAY_HIDHIDE_ON, L"Enable Hiding");
+    }
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+
+    // Settings submenu
+    HMENU settingsMenu = CreatePopupMenu();
+    AppendMenuW(settingsMenu, MF_STRING, ID_TRAY_INSTALL_DRIVER, L"Install Driver");
+    AppendMenuW(settingsMenu, MF_STRING, ID_TRAY_UNINSTALL_DRIVER, L"Uninstall Driver");
+    AppendMenuW(settingsMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(settingsMenu, MF_STRING, ID_TRAY_BUILD_DRIVERS, L"Build Drivers");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)settingsMenu, L"Settings");
+
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
 
     POINT pt;
@@ -258,14 +354,28 @@ bool SendServiceCommand(const wchar_t* command, wchar_t* response, DWORD respons
     return false;
 }
 
+void ShowIpcError(DWORD errorCode)
+{
+    wchar_t buf[256];
+    swprintf_s(buf, L"Failed to communicate with DualProxy service.\nError: %lu\n\nIs the service running?", errorCode);
+    MessageBoxW(g_hwnd, buf, L"DualProxy", MB_OK | MB_ICONERROR);
+}
+
 void ToggleEmulation()
 {
     wchar_t response[64] = { 0 };
 
     if (g_enabled)
     {
-        if (SendServiceCommand(L"DISABLE", response, sizeof(response)) &&
-            wcscmp(response, L"OK") == 0)
+        if (!SendServiceCommand(L"DISABLE", response, sizeof(response)))
+        {
+            ShowIpcError(GetLastError());
+        }
+        else if (wcscmp(response, L"OK") != 0)
+        {
+            MessageBoxW(g_hwnd, L"Service returned unexpected response.", L"DualProxy", MB_OK | MB_ICONERROR);
+        }
+        else
         {
             g_enabled = false;
             UpdateTrayIcon(TRAY_RED);
@@ -273,11 +383,69 @@ void ToggleEmulation()
     }
     else
     {
-        if (SendServiceCommand(L"ENABLE", response, sizeof(response)) &&
-            wcscmp(response, L"OK") == 0)
+        if (!SendServiceCommand(L"ENABLE", response, sizeof(response)))
+        {
+            ShowIpcError(GetLastError());
+        }
+        else if (wcscmp(response, L"OK") != 0)
+        {
+            MessageBoxW(g_hwnd, L"Service returned unexpected response.", L"DualProxy", MB_OK | MB_ICONERROR);
+        }
+        else
         {
             g_enabled = true;
             UpdateTrayIcon(TRAY_GREEN);
+        }
+    }
+}
+
+void ToggleHidHide()
+{
+    wchar_t response[64] = { 0 };
+    const wchar_t* cmd = g_hidHideOn ? L"HIDHIDE_OFF" : L"HIDHIDE_ON";
+
+    if (!SendServiceCommand(cmd, response, sizeof(response)))
+    {
+        ShowIpcError(GetLastError());
+    }
+    else if (wcscmp(response, L"OK") != 0)
+    {
+        MessageBoxW(g_hwnd, L"Service returned unexpected response.", L"DualProxy", MB_OK | MB_ICONERROR);
+    }
+    else
+    {
+        g_hidHideOn = !g_hidHideOn;
+        UpdateTrayIcon(g_state);
+    }
+}
+
+void RefreshStates()
+{
+    wchar_t response[64] = { 0 };
+    if (SendServiceCommand(L"STATUS", response, sizeof(response)))
+    {
+        // Format: "active|hiding_on" or "inactive|hiding_off" or "disconnected|hiding_off"
+        wchar_t* pipe = wcschr(response, L'|');
+        if (pipe)
+        {
+            *pipe = L'\0';
+            g_hidHideOn = (wcscmp(pipe + 1, L"hiding_on") == 0);
+
+            if (wcscmp(response, L"active") == 0)
+            {
+                g_enabled = true;
+                UpdateTrayIcon(TRAY_GREEN);
+            }
+            else if (wcscmp(response, L"inactive") == 0)
+            {
+                g_enabled = false;
+                UpdateTrayIcon(TRAY_RED);
+            }
+            else
+            {
+                g_enabled = false;
+                UpdateTrayIcon(TRAY_YELLOW);
+            }
         }
     }
 }
