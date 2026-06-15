@@ -3,6 +3,8 @@
 #include <memory.h>
 #include <wchar.h>
 
+static const GUID HID_GUID = {0x4d1e55b2, 0xf16f, 0x11cf, {0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
+
 #define SVC_MAIN "SVC_MAIN"
 #define SVC_BT   "SVC_BT"
 #define SVC_IOCTL "SVC_IOCTL"
@@ -17,6 +19,10 @@ DualSenseBridge::DualSenseBridge()
     , m_hidHideActive(false)
     , m_sequenceCounter(0)
     , m_lastActivateError(0)
+    , m_hiddenUsbCount(0)
+    , m_btOutputFailed(false)
+    , m_btReadEnabled(true)
+    , m_btReadPrev(true)
 {
     m_btDevice.Handle = INVALID_HANDLE_VALUE;
     m_btDevice.Vid = 0;
@@ -138,6 +144,19 @@ bool DualSenseBridge::FindBtController()
             {
                 ConfigureHidHide(m_btDevice.DeviceInstanceId);
             }
+            else if (m_hidHideActive)
+            {
+                // Device instance path may have changed on reconnect.
+                // Re-apply dev-hide to ensure the new instance is hidden.
+                const wchar_t* hidHidePath = L"C:\\Program Files\\Nefarius Software Solutions\\HidHide\\x64\\HidHideCLI.exe";
+                if (GetFileAttributesW(hidHidePath) != INVALID_FILE_ATTRIBUTES)
+                {
+                    WCHAR cmdLine[1024];
+                    swprintf_s(cmdLine, L"\"%s\" dev-hide \"%ls\"", hidHidePath, m_btDevice.DeviceInstanceId);
+                    RunHidHideProcess(cmdLine);
+                    LOG_DEBUG("HIDHIDE", 650, "Re-applied dev-hide after reconnect: %ls", m_btDevice.DeviceInstanceId);
+                }
+            }
 
             return true;
         }
@@ -229,6 +248,7 @@ bool DualSenseBridge::ConfigureHidHide(const wchar_t* btDeviceInstanceId)
         LOG_INFO("HIDHIDE", 620, "HidHide configured: whitelisted, hidden, cloaking on");
         m_hidHideConfigured = true;
         m_hidHideActive = true;
+        TriggerPnpRescan();
     }
     else
     {
@@ -238,19 +258,19 @@ bool DualSenseBridge::ConfigureHidHide(const wchar_t* btDeviceInstanceId)
     return allOk;
 }
 
+void DualSenseBridge::TriggerPnpRescan()
+{
+    DEVINST devRoot = 0;
+    CONFIGRET cr = CM_Locate_DevNode(&devRoot, NULL, CM_LOCATE_DEVNODE_NORMAL);
+    if (cr == CR_SUCCESS)
+    {
+        cr = CM_Reenumerate_DevNode(devRoot, CM_REENUMERATE_SYNCHRONOUS);
+        LOG_DEBUG("HIDHIDE", 660, "PnP rescan (sync) result=%d", cr);
+    }
+}
+
 bool DualSenseBridge::EnableHidHide()
 {
-    if (m_hidHideActive)
-    {
-        return true;
-    }
-
-    if (m_btDeviceInstanceId[0] == L'\0')
-    {
-        LOG_WARN("HIDHIDE", 630, "No stored BT device instance ID, cannot enable hiding");
-        return false;
-    }
-
     const wchar_t* hidHidePath = L"C:\\Program Files\\Nefarius Software Solutions\\HidHide\\x64\\HidHideCLI.exe";
     if (GetFileAttributesW(hidHidePath) == INVALID_FILE_ATTRIBUTES)
     {
@@ -261,11 +281,77 @@ bool DualSenseBridge::EnableHidHide()
     WCHAR cmdLine[1024];
     bool allOk = true;
 
-    swprintf_s(cmdLine, L"\"%s\" dev-hide \"%s\"", hidHidePath, m_btDeviceInstanceId);
-    if (!RunHidHideProcess(cmdLine))
+    // Hide the BT HID device instance (if we have one)
+    if (m_btDeviceInstanceId[0] != L'\0')
     {
-        LOG_WARN("HIDHIDE", 632, "Enable: dev-hide failed");
-        allOk = false;
+        LOG_DEBUG("HIDHIDE", 661, "Enable: dev-hide BT instance %ls", m_btDeviceInstanceId);
+        swprintf_s(cmdLine, L"\"%s\" dev-hide \"%s\"", hidHidePath, m_btDeviceInstanceId);
+        if (!RunHidHideProcess(cmdLine))
+        {
+            LOG_WARN("HIDHIDE", 632, "Enable: BT dev-hide failed");
+            allOk = false;
+        }
+    }
+    else
+    {
+        LOG_WARN("HIDHIDE", 662, "Enable: m_btDeviceInstanceId is EMPTY, cannot dev-hide BT");
+    }
+
+    // Also hide any USB HID DualSense instances (non-VHF) that games might find.
+    // Use HID class GUID to enumerate all HID devices including BT HID.
+    {
+        HDEVINFO hidInfo = SetupDiGetClassDevs(&HID_GUID, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (hidInfo != INVALID_HANDLE_VALUE)
+        {
+            SP_DEVICE_INTERFACE_DATA ifData = { sizeof(SP_DEVICE_INTERFACE_DATA) };
+            for (DWORD idx = 0; SetupDiEnumDeviceInterfaces(hidInfo, NULL, &HID_GUID, idx, &ifData); idx++)
+            {
+                DWORD reqSize = 0;
+                SetupDiGetDeviceInterfaceDetail(hidInfo, &ifData, NULL, 0, &reqSize, NULL);
+                if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) continue;
+
+                PSP_DEVICE_INTERFACE_DETAIL_DATA det = (PSP_DEVICE_INTERFACE_DETAIL_DATA)malloc(reqSize);
+                if (!det) continue;
+                det->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+
+                SP_DEVINFO_DATA devInfo = { sizeof(SP_DEVINFO_DATA) };
+                if (SetupDiGetDeviceInterfaceDetail(hidInfo, &ifData, det, reqSize, NULL, &devInfo))
+                {
+                    WCHAR devId[256] = { 0 };
+                    SetupDiGetDeviceInstanceId(hidInfo, &devInfo, devId, 256, NULL);
+
+                    // Skip if this is the BT device we already hid, or if empty
+                    if (devId[0] != L'\0' && wcscmp(devId, m_btDeviceInstanceId) != 0)
+                    {
+                        HANDLE h = CreateFile(det->DevicePath, GENERIC_READ | GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+                        if (h != INVALID_HANDLE_VALUE)
+                        {
+                            HIDD_ATTRIBUTES attr = { sizeof(HIDD_ATTRIBUTES) };
+                            if (HidD_GetAttributes(h, &attr) && attr.VendorID == 0x054C && attr.ProductID == 0x0CE6)
+                            {
+                                WCHAR prod[128] = { 0 };
+                                bool isVhf = (HidD_GetProductString(h, prod, sizeof(prod)) && wcsstr(prod, L"VHF") != NULL);
+                                if (!isVhf && m_hiddenUsbCount < 8)
+                                {
+                                    LOG_DEBUG("HIDHIDE", 663, "Enable: dev-hide USB proxy %ls", devId);
+                                    swprintf_s(cmdLine, L"\"%s\" dev-hide \"%s\"", hidHidePath, devId);
+                                    if (RunHidHideProcess(cmdLine))
+                                    {
+                                        wcsncpy_s(m_hiddenUsbIds[m_hiddenUsbCount], devId, _TRUNCATE);
+                                        m_hiddenUsbCount++;
+                                        LOG_DEBUG("HIDHIDE", 637, "USB proxy hidden: %ls", devId);
+                                    }
+                                }
+                            }
+                            CloseHandle(h);
+                        }
+                    }
+                }
+                free(det);
+            }
+            SetupDiDestroyDeviceInfoList(hidInfo);
+        }
     }
 
     swprintf_s(cmdLine, L"\"%s\" cloak-on", hidHidePath);
@@ -275,10 +361,16 @@ bool DualSenseBridge::EnableHidHide()
         allOk = false;
     }
 
+    // Force a PnP rescan so HidHide re-evaluates device visibility immediately.
+    // Without this, HidHide's dev-hide/cloak-on may not take effect until
+    // something else triggers a PnP event (like VHF activation or device reconnect).
+    TriggerPnpRescan();
+
     if (allOk)
     {
         m_hidHideActive = true;
-        LOG_INFO("HIDHIDE", 634, "HidHide re-enabled");
+        m_btReadEnabled = true;
+        LOG_INFO("HIDHIDE", 634, "HidHide re-enabled, BT reads resumed");
     }
     else
     {
@@ -290,17 +382,6 @@ bool DualSenseBridge::EnableHidHide()
 
 bool DualSenseBridge::DisableHidHide()
 {
-    if (!m_hidHideActive)
-    {
-        return true;
-    }
-
-    if (m_btDeviceInstanceId[0] == L'\0')
-    {
-        LOG_WARN("HIDHIDE", 640, "No stored BT device instance ID, cannot disable hiding");
-        return false;
-    }
-
     const wchar_t* hidHidePath = L"C:\\Program Files\\Nefarius Software Solutions\\HidHide\\x64\\HidHideCLI.exe";
     if (GetFileAttributesW(hidHidePath) == INVALID_FILE_ATTRIBUTES)
     {
@@ -318,17 +399,34 @@ bool DualSenseBridge::DisableHidHide()
         allOk = false;
     }
 
-    swprintf_s(cmdLine, L"\"%s\" dev-unhide \"%s\"", hidHidePath, m_btDeviceInstanceId);
-    if (!RunHidHideProcess(cmdLine))
+    // Unhide the BT device instance (if we have one)
+    if (m_btDeviceInstanceId[0] != L'\0')
     {
-        LOG_WARN("HIDHIDE", 643, "Disable: dev-unhide failed");
-        allOk = false;
+        swprintf_s(cmdLine, L"\"%s\" dev-unhide \"%s\"", hidHidePath, m_btDeviceInstanceId);
+        if (!RunHidHideProcess(cmdLine))
+        {
+            LOG_WARN("HIDHIDE", 643, "Disable: BT dev-unhide failed");
+            allOk = false;
+        }
     }
+
+    // Unhide any USB proxy devices we tracked
+    for (int i = 0; i < m_hiddenUsbCount; i++)
+    {
+        swprintf_s(cmdLine, L"\"%s\" dev-unhide \"%s\"", hidHidePath, m_hiddenUsbIds[i]);
+        if (!RunHidHideProcess(cmdLine))
+        {
+            LOG_WARN("HIDHIDE", 646, "Disable: USB dev-unhide failed: %ls", m_hiddenUsbIds[i]);
+            allOk = false;
+        }
+    }
+    m_hiddenUsbCount = 0;
 
     if (allOk)
     {
         m_hidHideActive = false;
-        LOG_INFO("HIDHIDE", 644, "HidHide disabled");
+        m_btReadEnabled = false;
+        LOG_INFO("HIDHIDE", 644, "HidHide disabled, BT reads paused");
     }
     else
     {
@@ -535,6 +633,34 @@ void DualSenseBridge::Run()
             LOG_INFO(SVC_CONV, 503, "Reconnected, input report size: %d", inputReportSize);
         }
 
+        if (!m_btReadEnabled)
+        {
+            // BT reads paused — let games access the real controller directly.
+            // Keep looping to detect reconnection and respond to IPC.
+            m_btReadPrev = false;
+            Sleep(100);
+            continue;
+        }
+
+        if (!m_btReadPrev)
+        {
+            // BT reads resumed after being paused (game likely exited).
+            // The game may have left the controller in a bad state via output/feature reports.
+            // Force a fresh re-enumeration to reset the HID device state.
+            LOG_INFO(SVC_BT, 211, "BT reads resumed, forcing re-enumeration");
+            if (m_btDevice.Handle != INVALID_HANDLE_VALUE)
+            {
+                HIDApi::Close(m_btDevice.Handle);
+            }
+            if (m_usbDevice.Handle != INVALID_HANDLE_VALUE)
+            {
+                HIDApi::Close(m_usbDevice.Handle);
+            }
+            m_btConnected = false;
+            m_btReadPrev = true;
+            continue;
+        }
+
         // 1. Read input report (open fresh handle each time for reliability)
         ZeroMemory(rawInput, sizeof(rawInput));
         if (!HIDApi::ReadInputFromPath(m_btDevice.DevicePath, rawInput, inputReportSize, 100))
@@ -548,7 +674,11 @@ void DualSenseBridge::Run()
             }
             if (err != ERROR_TIMEOUT)
             {
-                LOG_DEBUG(SVC_BT, 205, "ReadInput failed, err=%d", err);
+                // Read failure with error other than timeout — device likely in bad state.
+                // Force re-enumeration to recover.
+                LOG_DEBUG(SVC_BT, 205, "ReadInput failed, err=%d, forcing re-enumeration", err);
+                HIDApi::Close(m_btDevice.Handle);
+                continue;
             }
         }
         else
@@ -633,55 +763,85 @@ void DualSenseBridge::Run()
         // 3. Check for output reports (haptics, LEDs from games)
         if (m_active)
         {
-            ZeroMemory(usbOutput, sizeof(usbOutput));
-            DWORD outputSize = sizeof(usbOutput);
-            if (ReadOutputReport(usbOutput, &outputSize) && outputSize > 0)
+            // Skip BT output if previous write crashed the BT stack (err=995)
+            if (m_btOutputFailed && isBtFormat)
             {
-                LOG_INFO(SVC_IOCTL, 403, "Output report received from VHF, size=%d reportId=0x%02X",
-                    outputSize, usbOutput[0]);
-
-                // 5. Convert USB output to BT format and forward to physical controller.
-                // Open a fresh non-overlapped handle for WriteFile (interrupt out channel).
-                ZeroMemory(btOutput, sizeof(btOutput));
-                btOutputSize = sizeof(btOutput);
-
-                if (UsbToBtOutputReport(usbOutput, outputSize, btOutput, sizeof(btOutput), &btOutputSize))
+                // Drain the output queue to prevent backpressure on VHF
+                DWORD drained = 0;
+                BYTE dummy[48];
+                while (ReadOutputReport(dummy, &drained) && drained > 0)
                 {
-                    HANDLE hOut = CreateFile(
-                        m_btDevice.DevicePath,
-                        GENERIC_WRITE,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        NULL,
-                        OPEN_EXISTING,
-                        0, // synchronous - needed for WriteFile
-                        NULL
-                    );
+                    drained = 0;
+                }
+            }
+            else
+            {
+                ZeroMemory(usbOutput, sizeof(usbOutput));
+                DWORD outputSize = sizeof(usbOutput);
+                if (ReadOutputReport(usbOutput, &outputSize) && outputSize > 0)
+                {
+                    LOG_INFO(SVC_IOCTL, 403, "Output report received from VHF, size=%d reportId=0x%02X",
+                        outputSize, usbOutput[0]);
 
-                    if (hOut != INVALID_HANDLE_VALUE)
+                    // If BT-connected, convert to BT format and forward via HidD_SetOutputReport.
+                    // This uses a control transfer (safer for BT) rather than a raw interrupt-out WriteFile,
+                    // which can crash the Realtek BT stack with err=995.
+                    if (isBtFormat && !m_btOutputFailed)
                     {
-                        DWORD bytesWritten = 0;
-                        if (WriteFile(hOut, btOutput, btOutputSize, &bytesWritten, NULL) &&
-                            bytesWritten == btOutputSize)
+                        ZeroMemory(btOutput, sizeof(btOutput));
+                        btOutputSize = sizeof(btOutput);
+
+                        if (UsbToBtOutputReport(usbOutput, outputSize, btOutput, sizeof(btOutput), &btOutputSize))
                         {
-                            LOG_INFO(SVC_BT, 204, "Output WriteFile OK, BT size=%d seq=%d",
-                                btOutputSize, (btOutput[1] >> 4) & 0x0F);
+                            HANDLE hOut = CreateFile(
+                                m_btDevice.DevicePath,
+                                GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL,
+                                OPEN_EXISTING,
+                                0,
+                                NULL
+                            );
+
+                            if (hOut != INVALID_HANDLE_VALUE)
+                            {
+                                if (HidD_SetOutputReport(hOut, btOutput, btOutputSize))
+                                {
+                                    LOG_INFO(SVC_BT, 204, "Output HidD_SetOutputReport OK, BT size=%d seq=%d",
+                                        btOutputSize, (btOutput[1] >> 4) & 0x0F);
+                                }
+                                else
+                                {
+                                    DWORD err = GetLastError();
+                                    LOG_ERROR(SVC_BT, 203, "HidD_SetOutputReport failed, error=%d btSize=%d",
+                                        err, btOutputSize);
+                                    if (err == 995)
+                                    {
+                                        LOG_CRITICAL(SVC_BT, 209,
+                                            "BT stack crashed by output report (err=995). "
+                                            "Disabling BT output forwarding to protect stack.");
+                                        m_btOutputFailed = true;
+                                    }
+                                }
+                                CloseHandle(hOut);
+                            }
+                            else
+                            {
+                                LOG_ERROR(SVC_BT, 207, "Open BT handle for output failed, error=%d",
+                                    GetLastError());
+                            }
                         }
                         else
                         {
-                            DWORD err = GetLastError();
-                            LOG_ERROR(SVC_BT, 203, "WriteFile failed, error=%d btSize=%d", err, btOutputSize);
+                            LOG_WARN(SVC_CONV, 501, "Failed to convert USB output report to BT format");
                         }
-                        CloseHandle(hOut);
                     }
-                    else
+                    // If USB-connected, forward output as-is (48-byte USB output report)
+                    // via the USB proxy handle.
+                    else if (!isBtFormat && m_usbDevice.Handle != INVALID_HANDLE_VALUE)
                     {
-                        LOG_ERROR(SVC_BT, 207, "Open BT handle for output failed, error=%d",
-                            GetLastError());
+                        HIDApi::WriteOutput(m_usbDevice.Handle, usbOutput, outputSize);
                     }
-                }
-                else
-                {
-                    LOG_WARN(SVC_CONV, 501, "Failed to convert USB output report to BT format");
                 }
             }
         }

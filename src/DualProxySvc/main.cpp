@@ -313,7 +313,6 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam)
         if (wcscmp(command, L"ENABLE") == 0)
         {
             bool emuOk = g_bridge.Activate();
-            g_bridge.EnableHidHide();
             if (emuOk)
             {
                 wcscpy_s(response, L"OK");
@@ -328,7 +327,6 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam)
         else if (wcscmp(command, L"DISABLE") == 0)
         {
             bool emuOk = g_bridge.Deactivate();
-            g_bridge.DisableHidHide();
             if (emuOk)
             {
                 wcscpy_s(response, L"OK");
@@ -336,8 +334,8 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam)
             }
             else
             {
-                wcscpy_s(response, L"FAIL");
-                LOG_WARN(SVC_IPC, 508, "DISABLE command failed");
+                wcscpy_s(response, L"OK");
+                LOG_WARN(SVC_IPC, 508, "DISABLE command had deactivate error, but continuing");
             }
         }
         else if (wcscmp(command, L"STATUS") == 0)

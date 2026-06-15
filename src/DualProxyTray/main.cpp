@@ -43,6 +43,7 @@ void ToggleHidHide();
 void RefreshStates();
 void LoadSettings();
 void SaveSettings();
+void SetAutoStart(bool enable);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
@@ -90,6 +91,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Load settings
     LoadSettings();
+
+    // Auto-start with Windows
+    SetAutoStart(true);
+
+    // Restore last emulation state after a short delay to let service initialize
+    if (g_enabled)
+    {
+        wchar_t response[64] = { 0 };
+        SendServiceCommand(L"ENABLE", response, sizeof(response));
+    }
+
     RefreshStates();
 
     // Message loop
@@ -379,6 +391,7 @@ void ToggleEmulation()
         {
             g_enabled = false;
             UpdateTrayIcon(TRAY_RED);
+            SaveSettings();
         }
     }
     else
@@ -395,6 +408,7 @@ void ToggleEmulation()
         {
             g_enabled = true;
             UpdateTrayIcon(TRAY_GREEN);
+            SaveSettings();
         }
     }
 }
@@ -450,13 +464,47 @@ void RefreshStates()
     }
 }
 
+static void GetSettingsPath(wchar_t* path, DWORD size)
+{
+    GetEnvironmentVariableW(L"LOCALAPPDATA", path, size);
+    wcscat_s(path, size, L"\\DualProxy\\settings.ini");
+}
+
+static void CreateSettingsDir()
+{
+    wchar_t path[MAX_PATH];
+    GetSettingsPath(path, MAX_PATH);
+    wchar_t dir[MAX_PATH];
+    wcscpy_s(dir, path);
+    PathRemoveFileSpecW(dir);
+    CreateDirectoryW(dir, NULL);
+}
+
+void SetAutoStart(bool enable)
+{
+    HKEY key;
+    LONG ret = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &key);
+    if (ret != ERROR_SUCCESS) return;
+
+    if (enable)
+    {
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileNameW(NULL, exePath, MAX_PATH);
+        RegSetValueExW(key, L"DualProxy", 0, REG_SZ, (BYTE*)exePath, (DWORD)((wcslen(exePath) + 1) * sizeof(wchar_t)));
+    }
+    else
+    {
+        RegDeleteValueW(key, L"DualProxy");
+    }
+
+    RegCloseKey(key);
+}
+
 void LoadSettings()
 {
     wchar_t path[MAX_PATH];
-    GetEnvironmentVariableW(L"LOCALAPPDATA", path, MAX_PATH);
-    wcscat_s(path, L"\\DualProxy\\settings.ini");
+    GetSettingsPath(path, MAX_PATH);
 
-    // Read settings from INI file (if exists)
     g_enabled = GetPrivateProfileIntW(L"Settings", L"Enabled", 0, path) != 0;
 
     if (g_enabled)
@@ -467,15 +515,10 @@ void LoadSettings()
 
 void SaveSettings()
 {
-    wchar_t path[MAX_PATH];
-    GetEnvironmentVariableW(L"LOCALAPPDATA", path, MAX_PATH);
-    wcscat_s(path, L"\\DualProxy\\settings.ini");
+    CreateSettingsDir();
 
-    // Create directory if needed
-    wchar_t dir[MAX_PATH];
-    wcscpy_s(dir, path);
-    PathRemoveFileSpecW(dir);
-    CreateDirectoryW(dir, NULL);
+    wchar_t path[MAX_PATH];
+    GetSettingsPath(path, MAX_PATH);
 
     wchar_t buf[16];
     swprintf_s(buf, L"%d", g_enabled ? 1 : 0);

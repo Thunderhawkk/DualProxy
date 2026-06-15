@@ -32,6 +32,8 @@ public:
     bool EnableHidHide();
     bool DisableHidHide();
     bool IsHidHideActive() const { return m_hidHideActive; }
+    void SetBtReadEnabled(bool enabled) { m_btReadEnabled = enabled; }
+    static void TriggerPnpRescan();
 
 private:
     bool OpenSideband();
@@ -53,5 +55,10 @@ private:
     bool m_hidHideActive;
     int  m_sequenceCounter;
     wchar_t m_btDeviceInstanceId[256];
+    wchar_t m_hiddenUsbIds[8][256];
+    int m_hiddenUsbCount;
     DWORD m_lastActivateError;
+    bool m_btOutputFailed;    // set true after first err=995 to prevent BT stack crash
+    bool m_btReadEnabled;     // false = stop reading BT (let games access directly)
+    bool m_btReadPrev;        // previous m_btReadEnabled value, for transition detection
 };
