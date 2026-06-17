@@ -20,7 +20,10 @@ $DriverSysPath = "$SolutionDir\$Platform\$Configuration\VirtualDualSense.sys"
 $ServiceExePath = "$SolutionDir\$Platform\$Configuration\DualProxySvc.exe"
 $TrayExePath = "$SolutionDir\$Platform\$Configuration\DualProxyTray.exe"
 
-$DevConPath = Resolve-Path (Join-Path $PSScriptRoot "..\Drivers\devcon.exe")
+$DevConPath = Get-SdkToolPath "devcon"
+if (-not $DevConPath) {
+    throw "devcon.exe not found. Install Windows 10 SDK or specify DevConPath manually."
+}
 $DriverDest = "$env:SystemRoot\System32\drivers\VirtualDualSense.sys"
 $ServiceName = "DualProxySvc"
 $DriverName = "VirtualDualSense"

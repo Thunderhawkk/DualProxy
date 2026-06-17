@@ -1,8 +1,38 @@
 #Requires -RunAsAdministrator
 
 param(
-    [string]$DevConPath = "$PSScriptRoot\..\Drivers\devcon.exe"
+    [string]$DevConPath = ""
 )
+
+if (-not $DevConPath -or -not (Test-Path $DevConPath)) {
+    $sdkBase = @(
+        "$env:ProgramFiles (x86)\Windows Kits\10\bin",
+        "$env:ProgramFiles\Windows Kits\10\bin",
+        "C:\Program Files (x86)\Windows Kits\10\bin",
+        "C:\Program Files\Windows Kits\10\bin"
+    )
+    foreach ($base in $sdkBase) {
+        $verDirs = Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^10\.\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending
+        foreach ($verDir in $verDirs) {
+            $candidate = Join-Path $verDir.FullName "x64\devcon.exe"
+            if (Test-Path $candidate) {
+                $DevConPath = $candidate
+                break
+            }
+            $candidate = Join-Path $verDir.FullName "x86\devcon.exe"
+            if (Test-Path $candidate) {
+                $DevConPath = $candidate
+                break
+            }
+        }
+        if ($DevConPath) { break }
+    }
+}
+if (-not $DevConPath -or -not (Test-Path $DevConPath)) {
+    Write-Warn "devcon.exe not found. Set DevConPath parameter or install Windows SDK."
+}
 
 $DriverDest = "$env:SystemRoot\System32\drivers\VirtualDualSense.sys"
 $ServiceName = "DualProxySvc"
@@ -150,7 +180,7 @@ if (Test-Path $svcPath) {
 
 # Step 7: Remove catalog file from source directory
 Write-Step "Removing catalog file..."
-$catPath = "G:\Code\OpenCode\Dual\src\VirtualDualSense\VirtualDualSense.cat"
+$catPath = "$PSScriptRoot\..\src\VirtualDualSense\VirtualDualSense.cat"
 if (Test-Path $catPath) {
     Remove-Item -Path $catPath -Force -ErrorAction SilentlyContinue
     Write-Success "Catalog file removed"
